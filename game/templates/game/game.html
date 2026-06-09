@@ -1,0 +1,39 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lancer Advancer — Room</title>
+  <link rel="stylesheet" href="{% static 'game/css/styles.css' %}" />
+</head>
+<body>
+  <main class="game">
+    <header class="game-header">
+      <a class="back-link" href="/">&larr; Lobby</a>
+      <span id="status" class="status">Connecting…</span>
+    </header>
+
+    <canvas id="board" width="480" height="320"></canvas>
+
+    <div class="controls">
+      <button id="turn-btn" class="btn btn-primary" disabled>Take Turn</button>
+      <button id="resign-btn" class="btn btn-danger" disabled>Resign</button>
+    </div>
+  </main>
+
+  <!-- Result / error popup -->
+  <div id="overlay" class="overlay hidden">
+    <div class="modal">
+      <h2 id="overlay-title"></h2>
+      <p id="overlay-text"></p>
+      <a class="btn btn-primary" href="/">Back to Lobby</a>
+    </div>
+  </div>
+
+  <script>
+    window.ROOM_ID = "{{ room_id|escapejs }}";
+  </script>
+  <script src="{% static 'game/js/game.js' %}"></script>
+</body>
+</html>

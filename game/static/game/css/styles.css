@@ -1,0 +1,181 @@
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --text: #e2e8f0;
+  --muted: #94a3b8;
+  --red: #dc2626;
+  --blue: #2563eb;
+  --accent: #38bdf8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  justify-content: center;
+  align-items: flex-start;
+  background: var(--bg);
+  color: var(--text);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+h1,
+h2 {
+  margin: 0 0 0.5rem;
+}
+
+.tagline {
+  color: var(--muted);
+  margin-top: 0;
+}
+
+/* ---- Buttons ---- */
+.btn {
+  display: inline-block;
+  border: none;
+  border-radius: 8px;
+  padding: 0.7rem 1.3rem;
+  font-size: 1rem;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+  color: #fff;
+  transition: filter 0.15s ease, opacity 0.15s ease;
+}
+
+.btn:hover {
+  filter: brightness(1.1);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  filter: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #04283a;
+}
+
+.btn-danger {
+  background: var(--red);
+}
+
+/* ---- Lobby ---- */
+.lobby {
+  width: min(560px, 92vw);
+  padding: 2.5rem 1rem;
+}
+
+.lobby > .btn {
+  margin: 1rem 0 2rem;
+}
+
+.rooms h2 {
+  font-size: 1.1rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.room-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.room-list li {
+  background: var(--panel);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.room-list li.empty {
+  color: var(--muted);
+  justify-content: center;
+}
+
+.room-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.95rem;
+}
+
+/* ---- Game ---- */
+.game {
+  width: min(560px, 92vw);
+  padding: 1.5rem 1rem;
+  text-align: center;
+}
+
+.game-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.back-link {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.status {
+  color: var(--muted);
+  font-weight: 600;
+}
+
+#board {
+  background: var(--panel);
+  border-radius: 10px;
+  width: 100%;
+  height: auto;
+  touch-action: manipulation;
+}
+
+.controls {
+  margin-top: 1.25rem;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: center;
+}
+
+/* ---- Overlay / popup ---- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.8);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.overlay.hidden {
+  display: none;
+}
+
+.modal {
+  background: var(--panel);
+  border-radius: 12px;
+  padding: 2rem 2.5rem;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal h2 {
+  font-size: 2rem;
+}
+
+.modal .btn {
+  margin-top: 1rem;
+}

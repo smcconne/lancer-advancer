@@ -1,0 +1,31 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Lancer Advancer</title>
+  <link rel="stylesheet" href="{% static 'game/css/styles.css' %}" />
+</head>
+<body>
+  <main class="lobby">
+    <h1>Lancer Advancer</h1>
+    <p class="tagline">Host a room or join one waiting for a second player.</p>
+
+    <button id="host-btn" class="btn btn-primary">Host a game</button>
+
+    <section class="rooms">
+      <h2>Open rooms</h2>
+      <ul id="room-list" class="room-list">
+        <li class="empty">No open rooms yet.</li>
+      </ul>
+    </section>
+  </main>
+
+  {% csrf_token %}
+  <script>
+    window.CSRF_TOKEN = "{{ csrf_token }}";
+  </script>
+  <script src="{% static 'game/js/lobby.js' %}"></script>
+</body>
+</html>
