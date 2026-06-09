@@ -31,6 +31,8 @@ class Room:
     turn: str | None = None  # gl.HOST or gl.GUEST while PLAYING
     host_idx: int = gl.START_INDEX
     guest_idx: int = gl.START_INDEX
+    last_roll: int | None = None
+    last_mover: str | None = None
     winner: str | None = None  # gl.HOST or gl.GUEST once OVER
     created_at: float = field(default_factory=time.time)
 
@@ -114,17 +116,20 @@ class GameStore:
 
     # -- moves -------------------------------------------------------------
     def take_turn(self, room_id: str, role: str) -> Room | None:
-        """Advance ``role``'s disk one step if it is legitimately their turn."""
+        """Roll a die, advance ``role`` by that many cells, then pass turn."""
         with self._lock:
             room = self._rooms.get(room_id)
             if room is None or room.status != PLAYING or room.turn != role:
                 return None
+            roll = gl.roll_die()
             if role == gl.HOST:
-                room.host_idx = gl.advance(room.host_idx)
+                room.host_idx = gl.advance(room.host_idx, roll)
                 room.turn = gl.GUEST
             else:
-                room.guest_idx = gl.advance(room.guest_idx)
+                room.guest_idx = gl.advance(room.guest_idx, roll)
                 room.turn = gl.HOST
+            room.last_roll = roll
+            room.last_mover = role
             return room
 
     def resign(self, room_id: str, role: str) -> Room | None:
@@ -144,10 +149,21 @@ class GameStore:
         """Shared game state broadcast to both clients (canonical coords)."""
         host_r, host_c = gl.canonical_position(gl.HOST, room.host_idx)
         guest_r, guest_c = gl.canonical_position(gl.GUEST, room.guest_idx)
+        path: list[list[int]] = []
+        if room.last_mover and room.last_roll:
+            mover_idx = room.host_idx if room.last_mover == gl.HOST else room.guest_idx
+            from_idx = gl.advance(mover_idx, -room.last_roll)
+            path = [
+                [r, c]
+                for (r, c) in gl.loop_path(room.last_mover, from_idx, room.last_roll)
+            ]
         return {
             "status": room.status,
             "turn": room.turn,
             "winner": room.winner,
+            "roll": room.last_roll,
+            "last_mover": room.last_mover,
+            "path": path,
             "disks": {
                 "host": [host_r, host_c],
                 "guest": [guest_r, guest_c],

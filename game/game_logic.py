@@ -22,6 +22,8 @@ perspective transform, so host and guest geometry can never drift apart.
 """
 from __future__ import annotations
 
+import secrets
+
 ROWS = 4
 COLS = 6
 
@@ -80,6 +82,22 @@ def canonical_position(role: str, idx: int) -> tuple[int, int]:
     return canonical_loop(role)[idx % LOOP_LEN]
 
 
-def advance(idx: int) -> int:
-    """Index of the next cell one step counter-clockwise."""
-    return (idx + 1) % LOOP_LEN
+def advance(idx: int, steps: int = 1) -> int:
+    """Index after moving ``steps`` cells counter-clockwise around the loop."""
+    return (idx + steps) % LOOP_LEN
+
+
+def roll_die() -> int:
+    """Return a uniformly random die roll in the inclusive range [1, 6]."""
+    return secrets.randbelow(6) + 1
+
+
+def loop_path(role: str, from_idx: int, steps: int) -> list[tuple[int, int]]:
+    """Canonical cells visited after ``steps`` moves from ``from_idx``.
+
+    The returned path has exactly ``steps`` cells and includes the final cell.
+    """
+    return [
+        canonical_position(role, from_idx + offset)
+        for offset in range(1, steps + 1)
+    ]

@@ -1,4 +1,6 @@
 """Geometry tests: loop shape, counter-clockwise order, perspective symmetry."""
+from unittest.mock import patch
+
 from django.test import SimpleTestCase
 
 from game import game_logic as gl
@@ -52,6 +54,18 @@ class GameLogicTests(SimpleTestCase):
     def test_advance_wraps(self):
         self.assertEqual(gl.advance(0), 1)
         self.assertEqual(gl.advance(gl.LOOP_LEN - 1), 0)
+
+    def test_advance_multi_step(self):
+        self.assertEqual(gl.advance(0, 4), 4)
+        self.assertEqual(gl.advance(10, 4), 2)
+
+    def test_roll_die_maps_randbelow_values(self):
+        with patch("game.game_logic.secrets.randbelow", side_effect=[0, 1, 2, 3, 4, 5]):
+            self.assertEqual([gl.roll_die() for _ in range(6)], [1, 2, 3, 4, 5, 6])
+
+    def test_loop_path_wraps_and_includes_final_cell(self):
+        path = gl.loop_path(gl.HOST, 10, 4)
+        self.assertEqual(path, [(3, 4), (3, 5), (2, 5), (2, 4)])
 
     def test_full_lap_returns_to_start(self):
         for role in (gl.HOST, gl.GUEST):

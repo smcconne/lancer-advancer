@@ -14,10 +14,91 @@
       <span id="status" class="status">Connecting…</span>
     </header>
 
-    <canvas id="board" width="480" height="320"></canvas>
+    <div class="board-wrap">
+      <canvas id="board" width="480" height="320"></canvas>
+      <div id="die" class="die hidden" aria-hidden="true">
+        <div class="die__cube">
+          <div class="die__face die__face--1">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--1 die__face--inner"></div>
+          <div class="die__face die__face--2">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--2 die__face--inner"></div>
+          <div class="die__face die__face--3">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--3 die__face--inner"></div>
+          <div class="die__face die__face--4">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--4 die__face--inner"></div>
+          <div class="die__face die__face--5">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--5 die__face--inner"></div>
+          <div class="die__face die__face--6">
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+            <span class="pip"></span>
+          </div>
+          <div class="die__face die__face--6 die__face--inner"></div>
+          <div class="die__face die__cover die__cover--x"></div>
+          <div class="die__face die__cover die__cover--y"></div>
+          <div class="die__face die__cover die__cover--z"></div>
+        </div>
+      </div>
+    </div>
 
     <div class="controls">
-      <button id="turn-btn" class="btn btn-primary" disabled>Take Turn</button>
+      <button id="turn-btn" class="btn btn-primary" disabled>Roll Die</button>
       <button id="resign-btn" class="btn btn-danger" disabled>Resign</button>
     </div>
   </main>

@@ -5,6 +5,7 @@ production) and run on a single event loop so the in-memory channel layer can
 route messages between the two players.
 """
 from unittest import IsolatedAsyncioTestCase
+from unittest.mock import patch
 
 from channels.routing import URLRouter
 from channels.testing import WebsocketCommunicator
@@ -58,6 +59,9 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         _, host, guest, playing = await self._start_game()
         self.assertEqual(playing["status"], "playing")
         self.assertIn(playing["turn"], ("host", "guest"))
+        self.assertIsNone(playing["roll"])
+        self.assertIsNone(playing["last_mover"])
+        self.assertEqual(playing["path"], [])
         # Both disks start in their own bottom-right corner (canonical coords).
         self.assertEqual(playing["disks"]["host"], [3, 5])
         self.assertEqual(playing["disks"]["guest"], [0, 0])
@@ -69,15 +73,20 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        await comm.send_json_to({"action": "take_turn"})
-        state = await recv_until(host, "state")
-        await recv_until(guest, "state")  # opponent sees it too
+        with patch("game.game_logic.roll_die", return_value=4):
+            await comm.send_json_to({"action": "take_turn"})
+            state = await recv_until(host, "state")
+            await recv_until(guest, "state")  # opponent sees it too
 
         # Turn passed to the other player.
         self.assertEqual(state["turn"], "guest" if mover == "host" else "host")
-        # The mover's disk advanced exactly one counter-clockwise step.
-        expected = list(gl.canonical_position(mover, 1))
+        # The mover's disk advanced by the rolled value.
+        expected = list(gl.canonical_position(mover, 4))
         self.assertEqual(state["disks"][mover], expected)
+        self.assertEqual(state["roll"], 4)
+        self.assertEqual(state["last_mover"], mover)
+        self.assertEqual(len(state["path"]), 4)
+        self.assertEqual(state["path"][-1], state["disks"][mover])
 
         await host.disconnect()
         await guest.disconnect()
