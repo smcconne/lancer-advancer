@@ -150,9 +150,12 @@ class GameStore:
         host_r, host_c = gl.canonical_position(gl.HOST, room.host_idx)
         guest_r, guest_c = gl.canonical_position(gl.GUEST, room.guest_idx)
         path: list[list[int]] = []
+        move_from: list[int] | None = None
         if room.last_mover and room.last_roll:
             mover_idx = room.host_idx if room.last_mover == gl.HOST else room.guest_idx
             from_idx = gl.advance(mover_idx, -room.last_roll)
+            from_r, from_c = gl.canonical_position(room.last_mover, from_idx)
+            move_from = [from_r, from_c]
             path = [
                 [r, c]
                 for (r, c) in gl.loop_path(room.last_mover, from_idx, room.last_roll)
@@ -163,6 +166,7 @@ class GameStore:
             "winner": room.winner,
             "roll": room.last_roll,
             "last_mover": room.last_mover,
+            "move_from": move_from,
             "path": path,
             "disks": {
                 "host": [host_r, host_c],

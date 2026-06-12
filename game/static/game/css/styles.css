@@ -177,16 +177,11 @@ h2 {
 .die__face {
   position: absolute;
   inset: 0;
-  padding: 10px;
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 6px;
-  border-radius: 14px;
-  background: linear-gradient(145deg, #ffffff 0%, #dbe2ea 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8),
-    inset 0 0 14px rgba(15, 23, 42, 0.1),
-    inset 0 -5px 9px rgba(15, 23, 42, 0.14),
-    0 7px 14px rgba(2, 6, 23, 0.18);
+  padding: 0;
+  display: block;
+  border-radius: 20%;
+  background: #ffffff;
+  box-shadow: inset 0 0 16px rgba(148, 163, 184, 0.75);
   filter: brightness(var(--face-brightness, 1));
   will-change: filter;
   backface-visibility: hidden;
@@ -217,8 +212,10 @@ h2 {
 }
 
 .die__face--inner {
-  background: #c5ccd6;
+  inset: 0;
+  background: #e0e0e0;
   box-shadow: none;
+  border-radius: 0;
 }
 
 .die__face--inner.die__face--1 {
@@ -246,10 +243,11 @@ h2 {
 }
 
 .die__cover {
+  inset: 0;
   display: block;
   padding: 0;
   border-radius: 0;
-  background: #b9c2cd;
+  background: #e0e0e0;
   box-shadow: none;
   filter: none;
   will-change: auto;
@@ -268,39 +266,45 @@ h2 {
   transform: rotateZ(0deg);
 }
 
-.pip {
-  width: 12px;
-  height: 12px;
+
+.dot {
+  position: absolute;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  align-self: center;
-  justify-self: center;
-  background: #0f172a;
-  opacity: 0;
-  transition: opacity 0.08s linear;
+  background: #444;
+  box-shadow: inset 2px 0 5px rgba(0, 0, 0, 0.7);
 }
 
-.die__face--1 .pip:nth-child(5),
-.die__face--2 .pip:nth-child(3),
-.die__face--2 .pip:nth-child(7),
-.die__face--3 .pip:nth-child(1),
-.die__face--3 .pip:nth-child(5),
-.die__face--3 .pip:nth-child(9),
-.die__face--4 .pip:nth-child(1),
-.die__face--4 .pip:nth-child(3),
-.die__face--4 .pip:nth-child(7),
-.die__face--4 .pip:nth-child(9),
-.die__face--5 .pip:nth-child(1),
-.die__face--5 .pip:nth-child(3),
-.die__face--5 .pip:nth-child(5),
-.die__face--5 .pip:nth-child(7),
-.die__face--5 .pip:nth-child(9),
-.die__face--6 .pip:nth-child(1),
-.die__face--6 .pip:nth-child(3),
-.die__face--6 .pip:nth-child(4),
-.die__face--6 .pip:nth-child(6),
-.die__face--6 .pip:nth-child(7),
-.die__face--6 .pip:nth-child(9) {
-  opacity: 1;
+.dot.center {
+  top: 29px;
+  left: 29px;
+}
+
+.dot.dtop {
+  top: 8px;
+}
+
+.dot.dbottom {
+  top: 50px;
+}
+
+.dot.dleft {
+  left: 50px;
+}
+
+.dot.dright {
+  left: 8px;
+}
+
+.dot.center.dleft {
+  top: 29px;
+  left: 8px;
+}
+
+.dot.center.dright {
+  top: 29px;
+  left: 50px;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -345,3 +349,4 @@ h2 {
 .modal .btn {
   margin-top: 1rem;
 }
+

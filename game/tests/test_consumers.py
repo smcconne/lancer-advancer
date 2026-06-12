@@ -61,6 +61,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         self.assertIn(playing["turn"], ("host", "guest"))
         self.assertIsNone(playing["roll"])
         self.assertIsNone(playing["last_mover"])
+        self.assertIsNone(playing["move_from"])
         self.assertEqual(playing["path"], [])
         # Both disks start in their own bottom-right corner (canonical coords).
         self.assertEqual(playing["disks"]["host"], [3, 5])
@@ -85,6 +86,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         self.assertEqual(state["disks"][mover], expected)
         self.assertEqual(state["roll"], 4)
         self.assertEqual(state["last_mover"], mover)
+        self.assertEqual(state["move_from"], list(gl.canonical_position(mover, 0)))
         self.assertEqual(len(state["path"]), 4)
         self.assertEqual(state["path"][-1], state["disks"][mover])
 
