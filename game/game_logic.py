@@ -11,10 +11,11 @@ the top two rows (0, 1) are BLUE (the opponent). The guest sees the very same
 board rotated 180 degrees, so the guest's own track also appears red along the
 bottom of *their* screen and their disk starts in *their* bottom-right corner.
 
-Each player's disk travels a 12-cell loop around their own two-row track,
-advancing one cell counter-clockwise per turn. Starting from the bottom-right
-corner, counter-clockwise means: up the right edge, left across the top of the
-band, down the left edge, then right along the bottom back to the start.
+Each player's 4 disks travel a shared 12-cell loop around their own two-row
+track, advancing one cell counter-clockwise per move. Starting from the
+bottom-right corner, counter-clockwise means: up the right edge, left across
+the top of the band, down the left edge, then right along the bottom back to
+the start.
 
 Only the loop *shape* is defined once (`LOCAL_LOOP`, expressed in each player's
 own view). Canonical coordinates are derived by applying that player's
@@ -49,6 +50,8 @@ LOCAL_LOOP: list[tuple[int, int]] = [
 
 LOOP_LEN = len(LOCAL_LOOP)
 START_INDEX = 0
+START_INDICES = [0, 11, 10, 9]
+NUM_PIECES = len(START_INDICES)
 
 
 def transform(r: int, c: int) -> tuple[int, int]:
@@ -101,3 +104,25 @@ def loop_path(role: str, from_idx: int, steps: int) -> list[tuple[int, int]]:
         canonical_position(role, from_idx + offset)
         for offset in range(1, steps + 1)
     ]
+
+
+def legal_piece_moves(indices: list[int], roll: int) -> list[int]:
+    """Return piece slots that can move ``roll`` steps.
+
+    A move is illegal if the destination cell is currently occupied by one of
+    the player's other pieces.
+    """
+    if roll <= 0:
+        return []
+
+    legal: list[int] = []
+    for piece, idx in enumerate(indices):
+        target = advance(idx, roll)
+        blocked = any(
+            target == other_idx
+            for (other_piece, other_idx) in enumerate(indices)
+            if other_piece != piece
+        )
+        if not blocked:
+            legal.append(piece)
+    return legal

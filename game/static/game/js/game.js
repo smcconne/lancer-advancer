@@ -9,6 +9,8 @@
     disk: "#ffffff",
     diskOutline: "#0f172a",
     youRing: "#38bdf8",
+    selectedRing: "#f59e0b",
+    illegalX: "#ef4444",
   };
   const COLS = 6;
   const ROWS = 4;
@@ -38,6 +40,14 @@
   const statusEl = document.getElementById("status");
   const turnBtn = document.getElementById("turn-btn");
   const resignBtn = document.getElementById("resign-btn");
+  let turnRollIndicatorEl = document.getElementById("turn-roll-indicator");
+  if (!turnRollIndicatorEl && turnBtn && turnBtn.parentElement) {
+    turnRollIndicatorEl = document.createElement("span");
+    turnRollIndicatorEl.id = "turn-roll-indicator";
+    turnRollIndicatorEl.className = "turn-roll-indicator hidden";
+    turnRollIndicatorEl.setAttribute("aria-hidden", "true");
+    turnBtn.parentElement.insertBefore(turnRollIndicatorEl, turnBtn);
+  }
   const dieEl = document.getElementById("die");
   const dieCubeEl = dieEl ? dieEl.querySelector(".die__cube") : null;
   const reduceMotionQuery = window.matchMedia
@@ -73,12 +83,22 @@
   let myRole = null; // "host" | "guest"
   let lastState = null;
   let socket = null;
-  let awaitingRoll = false;
-  let hopPos = null;
+  let hopPos = null; // { role, pieceIndex, pos }
+  let previewPos = null; // { role, pieceIndex, pos }
+  let previewMove = null; // { mover, roll, track }
+  let selectedPiece = null;
+  let illegalOverlay = null; // { track }
   let lastMove = null;
   let dieTransitionHandler = null;
   let dieTransitionFallbackId = null;
   let depthRafId = null;
+  let latestStateVersion = -1;
+  let stateApplyToken = 0;
+  let inputLocked = false;
+  let transientStatusText = "";
+  let transientStatusUntil = 0;
+  let selectableFlashTimer = null;
+  let rollCycleTimer = null;
 
   const FACE_ORIENTATION = {
     1: { x: 0, y: 0 },
@@ -97,6 +117,14 @@
     5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]],
     6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
   };
+  const DIE_DOT_CLASSES = {
+    1: ["center"],
+    2: ["dtop dleft", "dbottom dright"],
+    3: ["dtop dleft", "center", "dbottom dright"],
+    4: ["dtop dleft", "dtop dright", "dbottom dleft", "dbottom dright"],
+    5: ["center", "dtop dleft", "dtop dright", "dbottom dleft", "dbottom dright"],
+    6: ["dtop dleft", "dtop dright", "dbottom dleft", "dbottom dright", "center dleft", "center dright"],
+  };
 
   // Canonical (server) coordinates -> this player's local view. The host sees
   // canonical coordinates directly; the guest sees the board rotated 180deg.
@@ -107,78 +135,11 @@
     return [r, c];
   }
 
-  function drawBoard() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const bottomColor = myRole === "guest" ? COLORS.blue : COLORS.red;
-    const topColor = myRole === "guest" ? COLORS.red : COLORS.blue;
-
-    // Host view: bottom red / top blue.
-    // Guest view: bottom blue / top red.
-    for (let r = 0; r < ROWS; r++) {
-      for (let c = 0; c < COLS; c++) {
-        ctx.fillStyle = r >= 2 ? bottomColor : topColor;
-        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
-      }
+  function toCanonical(r, c) {
+    if (myRole === "guest") {
+      return [ROWS - 1 - r, COLS - 1 - c];
     }
-
-    // Grid lines.
-    ctx.strokeStyle = COLORS.grid;
-    ctx.lineWidth = 2;
-    for (let c = 0; c <= COLS; c++) {
-      ctx.beginPath();
-      ctx.moveTo(c * CELL, 0);
-      ctx.lineTo(c * CELL, ROWS * CELL);
-      ctx.stroke();
-    }
-    for (let r = 0; r <= ROWS; r++) {
-      ctx.beginPath();
-      ctx.moveTo(0, r * CELL);
-      ctx.lineTo(COLS * CELL, r * CELL);
-      ctx.stroke();
-    }
-
-    if (lastMove && Array.isArray(lastMove.track) && lastMove.track.length > 1) {
-      drawMoveArrowShaft(lastMove.track, lastMove.mover);
-    }
-
-    if (lastState && lastState.disks) {
-      const hostPos =
-        hopPos && hopPos.role === "host" ? hopPos.pos : lastState.disks.host;
-      const guestPos =
-        hopPos && hopPos.role === "guest" ? hopPos.pos : lastState.disks.guest;
-      drawDisk(hostPos, "host");
-      drawDisk(guestPos, "guest");
-    }
-
-    if (lastMove && Array.isArray(lastMove.track) && lastMove.track.length > 1) {
-      drawMoveArrowHead(lastMove.track, lastMove.mover);
-      drawTrackDie(lastMove.track[0], lastMove.roll);
-    }
-  }
-
-  function drawDisk(pos, who) {
-    if (!pos) return;
-    const [lr, lc] = toLocal(pos[0], pos[1]);
-    const cx = lc * CELL + CELL / 2;
-    const cy = lr * CELL + CELL / 2;
-
-    const highlightedMover =
-      lastMove && (lastMove.mover === "host" || lastMove.mover === "guest")
-        ? lastMove.mover
-        : lastState &&
-            (lastState.last_mover === "host" || lastState.last_mover === "guest")
-          ? lastState.last_mover
-          : null;
-
-    ctx.beginPath();
-    ctx.arc(cx, cy, CELL * 0.32, 0, Math.PI * 2);
-    ctx.fillStyle = COLORS.disk;
-    ctx.fill();
-    ctx.lineWidth = 4;
-    // Highlight the most recently moved piece with the cyan ring.
-    ctx.strokeStyle = who === highlightedMover ? COLORS.youRing : COLORS.diskOutline;
-    ctx.stroke();
+    return [r, c];
   }
 
   function isCell(pos) {
@@ -188,6 +149,10 @@
       typeof pos[0] === "number" &&
       typeof pos[1] === "number"
     );
+  }
+
+  function sameCell(a, b) {
+    return isCell(a) && isCell(b) && a[0] === b[0] && a[1] === b[1];
   }
 
   function cellCenter(pos) {
@@ -211,6 +176,173 @@
 
   function moverColor(role) {
     return role === "host" ? COLORS.red : COLORS.blue;
+  }
+
+  function roleDisks(state, role) {
+    if (!state || !state.disks || !Array.isArray(state.disks[role])) {
+      return [];
+    }
+    return state.disks[role];
+  }
+
+  function pieceCell(state, role, piece) {
+    const disks = roleDisks(state, role);
+    if (!Array.isArray(disks[piece])) {
+      return null;
+    }
+    return disks[piece];
+  }
+
+  function clearSelection() {
+    selectedPiece = null;
+    previewPos = null;
+    previewMove = null;
+    illegalOverlay = null;
+  }
+
+  function currentArrowOverlay() {
+    const selectingMine =
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "select" &&
+      lastState.turn === myRole;
+    if (
+      selectingMine &&
+      previewMove &&
+      Array.isArray(previewMove.track) &&
+      previewMove.track.length > 1
+    ) {
+      return previewMove;
+    }
+    if (lastMove && Array.isArray(lastMove.track) && lastMove.track.length > 1) {
+      return lastMove;
+    }
+    return null;
+  }
+
+  function canSelectPieces() {
+    return (
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "select" &&
+      lastState.turn === myRole &&
+      !inputLocked
+    );
+  }
+
+  function waitingToConfirmSelection() {
+    return canSelectPieces() && Number.isInteger(selectedPiece);
+  }
+
+  function waitingToSelectPiece() {
+    return canSelectPieces() && !Number.isInteger(selectedPiece);
+  }
+
+  function waitingForOpponentToSelectPiece() {
+    return (
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "select" &&
+      (myRole === "host" || myRole === "guest") &&
+      lastState.turn !== myRole
+    );
+  }
+
+  function flashingSelectableStroke() {
+    // Smoothly blend between established highlight and outline colors.
+    const t = Date.now() / 1000;
+    const mix = (Math.sin(t * Math.PI * 2) + 1) / 2;
+    const start = { r: 56, g: 189, b: 248 }; // COLORS.youRing
+    const end = { r: 0, g: 0, b: 0 }; // black
+    const r = Math.round(start.r * mix + end.r * (1 - mix));
+    const g = Math.round(start.g * mix + end.g * (1 - mix));
+    const b = Math.round(start.b * mix + end.b * (1 - mix));
+    return "rgb(" + r + ", " + g + ", " + b + ")";
+  }
+
+  function syncSelectableFlashLoop() {
+    if (canSelectPieces() || waitingForOpponentToSelectPiece()) {
+      if (selectableFlashTimer !== null) return;
+      selectableFlashTimer = setInterval(function () {
+        if (!canSelectPieces() && !waitingForOpponentToSelectPiece()) {
+          clearInterval(selectableFlashTimer);
+          selectableFlashTimer = null;
+          return;
+        }
+        drawBoard();
+      }, 33);
+      return;
+    }
+
+    if (selectableFlashTimer !== null) {
+      clearInterval(selectableFlashTimer);
+      selectableFlashTimer = null;
+    }
+  }
+
+  function setTransientStatus(text, durationMs) {
+    transientStatusText = text;
+    transientStatusUntil = Date.now() + durationMs;
+    setTimeout(function () {
+      if (Date.now() >= transientStatusUntil) {
+        transientStatusText = "";
+        updateStatus();
+      }
+    }, durationMs + 30);
+  }
+
+  function setTurnButtonText(label) {
+    turnBtn.replaceChildren(document.createTextNode(label));
+  }
+
+  function hideTurnRollIndicator() {
+    if (!turnRollIndicatorEl) return;
+    turnRollIndicatorEl.classList.add("hidden");
+    turnRollIndicatorEl.classList.remove("die--red", "die--blue");
+    turnRollIndicatorEl.setAttribute("aria-hidden", "true");
+    turnRollIndicatorEl.replaceChildren();
+  }
+
+  function setTurnRollIndicator(roll, role) {
+    if (!turnRollIndicatorEl) return;
+
+    const classes = DIE_DOT_CLASSES[roll];
+    if (!classes) {
+      hideTurnRollIndicator();
+      return;
+    }
+
+    turnRollIndicatorEl.classList.remove("hidden", "die--red", "die--blue");
+    turnRollIndicatorEl.classList.add(
+      role === "host" ? "die--red" : "die--blue"
+    );
+    turnRollIndicatorEl.setAttribute("aria-hidden", "false");
+    turnRollIndicatorEl.replaceChildren();
+
+    classes.forEach(function (dotClasses) {
+      const dot = document.createElement("span");
+      dot.className = "dot " + dotClasses;
+      turnRollIndicatorEl.appendChild(dot);
+    });
+  }
+
+  function stopRollCycle() {
+    if (rollCycleTimer !== null) {
+      clearInterval(rollCycleTimer);
+      rollCycleTimer = null;
+    }
+  }
+
+  function startRollCycle(role) {
+    if (!turnRollIndicatorEl) return;
+    const showRandomFace = function () {
+      setTurnRollIndicator(Math.floor(Math.random() * 6) + 1, role);
+    };
+    showRandomFace();
+    if (rollCycleTimer !== null) {
+      clearInterval(rollCycleTimer);
+    }
+    rollCycleTimer = setInterval(showRandomFace, 150);
   }
 
   function arrowTrackPoints(track) {
@@ -271,8 +403,6 @@
     }
 
     const angle = Math.atan2(tip.y - prev.y, tip.x - prev.x);
-
-    // 2x larger than the previous head dimensions.
     const headLength = 48;
     const headWidth = 36;
     const halfW = headWidth / 2;
@@ -297,8 +427,6 @@
     ctx.fillStyle = moverStroke;
     ctx.fill();
 
-    // Draw both sides plus one-third of each base edge, leaving the center
-    // third open so there is no middle seam where head and shaft meet.
     [
       { width: 9, color: "#0b1220" },
       { width: 4.5, color: "#ffffff" },
@@ -317,7 +445,6 @@
       ctx.stroke();
     });
 
-    // Final fill pass keeps the head visibly solid (never hollow-looking).
     ctx.beginPath();
     ctx.moveTo(tip.x, tip.y);
     ctx.lineTo(leftX, leftY);
@@ -329,7 +456,7 @@
     ctx.restore();
   }
 
-  function drawTrackDie(origin, value) {
+  function drawTrackDie(origin, value, mover) {
     if (!isCell(origin) || typeof value !== "number" || !PIP_LAYOUT[value]) return;
 
     const center = cellCenter(origin);
@@ -340,7 +467,7 @@
 
     ctx.save();
     roundedRectPath(x, y, size, size, radius);
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = moverColor(mover);
     ctx.fill();
     ctx.lineWidth = 3;
     ctx.strokeStyle = "#0b1220";
@@ -354,52 +481,318 @@
       const py = y + size * anchors[pip[1]];
       ctx.beginPath();
       ctx.arc(px, py, pipRadius, 0, Math.PI * 2);
-      ctx.fillStyle = "#0b1220";
+      ctx.fillStyle = "#ffffff";
       ctx.fill();
     });
     ctx.restore();
+  }
+
+  function drawIllegalX(track) {
+    if (!illegalOverlay || !Array.isArray(track) || track.length === 0) return;
+    const points = track.filter(isCell).map(cellCenter);
+    if (points.length === 0) return;
+
+    let minX = points[0].x;
+    let maxX = points[0].x;
+    let minY = points[0].y;
+    let maxY = points[0].y;
+    points.forEach(function (p) {
+      minX = Math.min(minX, p.x);
+      maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y);
+      maxY = Math.max(maxY, p.y);
+    });
+
+    const pad = CELL * 0.25;
+    minX -= pad;
+    maxX += pad;
+    minY -= pad;
+    maxY += pad;
+
+    ctx.save();
+    ctx.lineCap = "round";
+    [
+      { width: 18, color: "#ffffff" },
+      { width: 10, color: COLORS.illegalX },
+    ].forEach(function (layer) {
+      ctx.strokeStyle = layer.color;
+      ctx.lineWidth = layer.width;
+      ctx.beginPath();
+      ctx.moveTo(minX, minY);
+      ctx.lineTo(maxX, maxY);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(maxX, minY);
+      ctx.lineTo(minX, maxY);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }
+
+  function drawDisk(pos, who, opts) {
+    if (!isCell(pos)) return;
+    const [lr, lc] = toLocal(pos[0], pos[1]);
+    const cx = lc * CELL + CELL / 2;
+    const cy = lr * CELL + CELL / 2;
+
+    const selected = !!(opts && opts.selected);
+    const movedLast = !!(opts && opts.movedLast);
+    const flashOutline = !!(opts && opts.flashOutline);
+    const moving = !!(opts && opts.moving);
+    const selectedStroke = moving ? COLORS.youRing : COLORS.selectedRing;
+    const stroke = flashOutline
+      ? flashingSelectableStroke()
+      : selected
+        ? selectedStroke
+      : movedLast
+        ? COLORS.youRing
+        : COLORS.diskOutline;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, CELL * 0.32, 0, Math.PI * 2);
+    ctx.fillStyle = COLORS.disk;
+    ctx.fill();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = stroke;
+    ctx.stroke();
+
+    if (selected && !flashOutline && !moving) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, CELL * 0.12, 0, Math.PI * 2);
+      ctx.fillStyle = COLORS.selectedRing;
+      ctx.fill();
+    }
+  }
+
+  function isPieceSelected(role, piece) {
+    return (
+      role === myRole &&
+      selectedPiece === piece
+    );
+  }
+
+  function drawRoleDisks(role, selectedOnly) {
+    const disks = roleDisks(lastState, role);
+    for (let piece = 0; piece < disks.length; piece++) {
+      const basePos = disks[piece];
+      if (!isCell(basePos)) continue;
+
+      const selected = isPieceSelected(role, piece);
+      if (selectedOnly === true && !selected) continue;
+      if (selectedOnly === false && selected) continue;
+
+      let drawPos = basePos;
+      if (
+        hopPos &&
+        hopPos.role === role &&
+        hopPos.pieceIndex === piece &&
+        isCell(hopPos.pos)
+      ) {
+        drawPos = hopPos.pos;
+      } else if (
+        previewPos &&
+        previewPos.role === role &&
+        previewPos.pieceIndex === piece &&
+        isCell(previewPos.pos)
+      ) {
+        drawPos = previewPos.pos;
+      }
+
+      const movedLast =
+        !!lastState &&
+        lastState.last_mover === role &&
+        lastState.moved_piece === piece;
+      const opponentSelecting =
+        waitingForOpponentToSelectPiece() &&
+        role !== myRole;
+      const flashOutline =
+        opponentSelecting ||
+        (role === myRole &&
+          canSelectPieces() &&
+          (waitingToSelectPiece() ||
+            (waitingToConfirmSelection() && selectedPiece === piece)));
+      const moving =
+        !!hopPos &&
+        hopPos.role === role &&
+        hopPos.pieceIndex === piece;
+      drawDisk(drawPos, role, {
+        selected: selected,
+        movedLast: movedLast,
+        flashOutline: flashOutline,
+        moving: moving,
+      });
+    }
+  }
+
+  function drawBoard() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const bottomColor = myRole === "guest" ? COLORS.blue : COLORS.red;
+    const topColor = myRole === "guest" ? COLORS.red : COLORS.blue;
+
+    for (let r = 0; r < ROWS; r++) {
+      for (let c = 0; c < COLS; c++) {
+        ctx.fillStyle = r >= 2 ? bottomColor : topColor;
+        ctx.fillRect(c * CELL, r * CELL, CELL, CELL);
+      }
+    }
+
+    ctx.strokeStyle = COLORS.grid;
+    ctx.lineWidth = 2;
+    for (let c = 0; c <= COLS; c++) {
+      ctx.beginPath();
+      ctx.moveTo(c * CELL, 0);
+      ctx.lineTo(c * CELL, ROWS * CELL);
+      ctx.stroke();
+    }
+    for (let r = 0; r <= ROWS; r++) {
+      ctx.beginPath();
+      ctx.moveTo(0, r * CELL);
+      ctx.lineTo(COLS * CELL, r * CELL);
+      ctx.stroke();
+    }
+
+    const arrowOverlay = currentArrowOverlay();
+    const movingSelectedPiece =
+      Number.isInteger(selectedPiece) &&
+      !!hopPos &&
+      hopPos.role === myRole &&
+      hopPos.pieceIndex === selectedPiece;
+
+    if (lastState && lastState.disks) {
+      drawRoleDisks("host", false);
+      drawRoleDisks("guest", false);
+    }
+
+    if (movingSelectedPiece && arrowOverlay) {
+      drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover);
+      drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover);
+      drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover);
+    }
+
+    if (lastState && lastState.disks) {
+      drawRoleDisks("host", true);
+      drawRoleDisks("guest", true);
+    }
+
+    if (!movingSelectedPiece && arrowOverlay) {
+      drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover);
+      drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover);
+      drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover);
+    }
+
+    if (illegalOverlay && Array.isArray(illegalOverlay.track)) {
+      drawIllegalX(illegalOverlay.track);
+    }
   }
 
   function getMoveOverlay(data, previousState) {
     const hasPath = Array.isArray(data.path) && data.path.length > 0;
     const hasRoll = typeof data.roll === "number" && data.roll >= 1 && data.roll <= 6;
     const hasMover = data.last_mover === "host" || data.last_mover === "guest";
-    if (!hasPath || !hasRoll || !hasMover) return null;
+    const hasPiece = Number.isInteger(data.moved_piece);
+    if (!hasPath || !hasRoll || !hasMover || !hasPiece) return null;
 
     const origin = isCell(data.move_from)
       ? data.move_from
-      : previousState &&
-          previousState.disks &&
-          isCell(previousState.disks[data.last_mover])
-        ? previousState.disks[data.last_mover]
-        : null;
+      : pieceCell(previousState, data.last_mover, data.moved_piece);
     if (!origin) return null;
 
     return {
       mover: data.last_mover,
+      piece: data.moved_piece,
       roll: data.roll,
       track: [origin].concat(data.path.filter(isCell)),
     };
   }
 
-  function updateStatus() {
-    if (!lastState) {
-      statusEl.textContent = "Connecting…";
-      return;
+  function currentStatusText() {
+    if (Date.now() < transientStatusUntil && transientStatusText) {
+      return transientStatusText;
     }
-    const s = lastState.status;
-    if (s === "waiting") {
-      statusEl.textContent = "Waiting for an opponent to join…";
-    } else if (s === "playing") {
-      statusEl.textContent =
-        lastState.turn === myRole ? "Your turn" : "Opponent's turn";
-    } else if (s === "over") {
-      statusEl.textContent = "Game over";
+    transientStatusText = "";
+
+    if (!lastState) {
+      return "Connecting…";
+    }
+    if (lastState.status === "waiting") {
+      return "Waiting for an opponent to join…";
+    }
+    if (lastState.status === "over") {
+      return "Game over";
+    }
+    if (lastState.phase === "select") {
+      if (lastState.turn === myRole) {
+        return Number.isInteger(selectedPiece)
+          ? "Piece selected. Confirm to move."
+          : "Select a piece to move.";
+      }
+      return "Opponent is choosing a piece...";
+    }
+    return lastState.turn === myRole ? "Your turn" : "Opponent's turn";
+  }
+
+  function updateStatus() {
+    statusEl.textContent = currentStatusText();
+
+    const canPlay =
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.turn === myRole;
+    const inSelectPhase =
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "select";
+    const selecting = canPlay && inSelectPhase;
+    const selectingMineNoPick = waitingToSelectPiece();
+    const selectingOpponent = waitingForOpponentToSelectPiece();
+    const showRollIndicator =
+      inSelectPhase &&
+      typeof lastState.roll === "number" &&
+      lastState.roll >= 1 &&
+      lastState.roll <= 6 &&
+      !!lastState.turn;
+
+    const cycleRollIndicator =
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "roll" &&
+      !!lastState.turn &&
+      !isDieRolling();
+
+    if (cycleRollIndicator) {
+      if (rollCycleTimer === null) {
+        startRollCycle(lastState.turn);
+      }
+    } else if (showRollIndicator) {
+      stopRollCycle();
+      setTurnRollIndicator(lastState.roll, lastState.turn);
+    } else {
+      stopRollCycle();
+      hideTurnRollIndicator();
     }
 
-    const myTurn = s === "playing" && lastState.turn === myRole;
-    turnBtn.disabled = !myTurn;
-    resignBtn.disabled = s !== "playing";
+    if (!canPlay) {
+      turnBtn.disabled = true;
+    } else if (selecting) {
+      turnBtn.disabled = inputLocked || !Number.isInteger(selectedPiece);
+    } else {
+      turnBtn.disabled = inputLocked;
+    }
+
+    if (selectingOpponent) {
+      setTurnButtonText("Wait");
+    } else if (selectingMineNoPick) {
+      setTurnButtonText("Pick");
+    } else if (selecting) {
+      setTurnButtonText("Confirm");
+    } else {
+      setTurnButtonText(turnBtn.disabled ? "Rolling" : "Roll Die");
+    }
+
+    resignBtn.disabled = !lastState || lastState.status !== "playing" || inputLocked;
+    canvas.classList.toggle("board--selectable", canSelectPieces());
+    syncSelectableFlashLoop();
   }
 
   function showOverlay(title, text) {
@@ -481,6 +874,20 @@
     }
   }
 
+  function setDieColor(role) {
+    if (!dieEl) return;
+    dieEl.classList.remove("die--red", "die--blue");
+    if (role === "host") {
+      dieEl.classList.add("die--red");
+    } else if (role === "guest") {
+      dieEl.classList.add("die--blue");
+    }
+  }
+
+  function isDieRolling() {
+    return !!dieEl && dieEl.classList.contains("die--rolling-geometry");
+  }
+
   function hideDie() {
     if (!dieEl) return;
     clearDieAnimation();
@@ -502,6 +909,8 @@
     }
     clearDieAnimation();
     stopDepthShading();
+    stopRollCycle();
+    hideTurnRollIndicator();
 
     const finalOrientation = FACE_ORIENTATION[finalFace] || FACE_ORIENTATION[1];
     const shouldReduceMotion = reduceMotionQuery ? reduceMotionQuery.matches : false;
@@ -559,118 +968,362 @@
     setCubeRotation(targetX, targetY);
   }
 
-  function hopPiece(role, path, onDone) {
-    const hops = Array.isArray(path) ? path : [];
+  function hopPiece(role, pieceIndex, path, onDone, applyToken, stepMs, settleMs) {
+    const hops = Array.isArray(path) ? path.filter(isCell) : [];
     if (hops.length === 0) {
       if (onDone) onDone();
       return;
     }
 
-    let step = 0;
-    function nextHop() {
-      hopPos = { role: role, pos: hops[step] };
-      drawBoard();
-      step += 1;
-      if (step >= hops.length) {
-        setTimeout(function () {
-          if (onDone) onDone();
-        }, 150);
-        return;
+    const baseStart = pieceCell(lastState, role, pieceIndex);
+    const startPos = isCell(baseStart) ? baseStart : hops[0];
+    const points = [startPos].concat(hops);
+    const segmentCount = Math.max(1, points.length - 1);
+    const durationMs = Math.max(stepMs * segmentCount, 180);
+    const startTime = performance.now();
+
+    function easeInOutCubic(t) {
+      if (t < 0.5) {
+        return 4 * t * t * t;
       }
-      setTimeout(nextHop, 180);
+      return 1 - Math.pow(-2 * t + 2, 3) / 2;
     }
 
-    nextHop();
+    function frame(now) {
+      if (applyToken !== stateApplyToken) {
+        return;
+      }
+
+      const elapsed = now - startTime;
+      const rawT = Math.min(1, Math.max(0, elapsed / durationMs));
+      const easedT = easeInOutCubic(rawT);
+      const pathT = easedT * segmentCount;
+      const segment = Math.min(segmentCount - 1, Math.floor(pathT));
+      const localT = Math.min(1, pathT - segment);
+
+      const a = points[segment];
+      const b = points[segment + 1];
+      const pos = [
+        a[0] + (b[0] - a[0]) * localT,
+        a[1] + (b[1] - a[1]) * localT,
+      ];
+
+      hopPos = { role: role, pieceIndex: pieceIndex, pos: pos };
+      drawBoard();
+
+      if (rawT >= 1) {
+        hopPos = {
+          role: role,
+          pieceIndex: pieceIndex,
+          pos: points[points.length - 1],
+        };
+        drawBoard();
+        setTimeout(function () {
+          if (applyToken !== stateApplyToken) {
+            return;
+          }
+          if (onDone) onDone();
+        }, settleMs);
+        return;
+      }
+
+      requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+  }
+
+  function previewRebound(role, pieceIndex, path, onDone, applyToken) {
+    const origin = pieceCell(lastState, role, pieceIndex);
+    const forward = Array.isArray(path) ? path.filter(isCell) : [];
+    if (!isCell(origin) || forward.length === 0) {
+      if (onDone) onDone();
+      return;
+    }
+
+    const reverse = forward.slice().reverse();
+    const reboundPath = forward.concat(reverse, [origin]);
+    illegalOverlay = { track: [origin].concat(forward) };
+    hopPiece(
+      role,
+      pieceIndex,
+      reboundPath,
+      function () {
+        if (applyToken !== stateApplyToken) {
+          return;
+        }
+        illegalOverlay = null;
+        hopPos = null;
+        if (onDone) onDone();
+      },
+      applyToken,
+      110,
+      70
+    );
+  }
+
+  function eventToCanonicalCell(event) {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+
+    const x = (event.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (event.clientY - rect.top) * (canvas.height / rect.height);
+    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+      return null;
+    }
+
+    const localCol = Math.floor(x / CELL);
+    const localRow = Math.floor(y / CELL);
+    return toCanonical(localRow, localCol);
+  }
+
+  function eventToCanvasPoint(event) {
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    return {
+      x: (event.clientX - rect.left) * (canvas.width / rect.width),
+      y: (event.clientY - rect.top) * (canvas.height / rect.height),
+    };
+  }
+
+  function eventHitsTrackDie(event) {
+    const overlay = currentArrowOverlay();
+    if (!overlay || !Array.isArray(overlay.track) || !isCell(overlay.track[0])) {
+      return false;
+    }
+    const point = eventToCanvasPoint(event);
+    if (!point) return false;
+    const center = cellCenter(overlay.track[0]);
+    const half = (CELL * 0.52) / 2;
+    return (
+      point.x >= center.x - half &&
+      point.x <= center.x + half &&
+      point.y >= center.y - half &&
+      point.y <= center.y + half
+    );
+  }
+
+  function shouldAnimateRoll(data) {
+    if (data.status !== "playing") return false;
+    if (typeof data.roll !== "number" || data.roll < 1 || data.roll > 6) {
+      return false;
+    }
+    return data.phase === "select" || !!data.no_legal_move;
+  }
+
+  function shouldAnimateOpponentMove(data, previousState) {
+    if (data.status !== "playing" || data.phase !== "roll") return false;
+    if (data.last_mover !== "host" && data.last_mover !== "guest") return false;
+    if (data.last_mover === myRole) return false;
+    if (!Number.isInteger(data.moved_piece)) return false;
+    if (!Array.isArray(data.path) || data.path.length === 0) return false;
+
+    const before = pieceCell(previousState, data.last_mover, data.moved_piece);
+    const after = pieceCell(data, data.last_mover, data.moved_piece);
+    if (!isCell(before) || !isCell(after)) return false;
+    return !sameCell(before, after);
+  }
+
+  function handleState(data) {
+    const incomingVersion =
+      typeof data.version === "number"
+        ? data.version
+        : latestStateVersion + 1;
+    if (incomingVersion < latestStateVersion) {
+      return;
+    }
+
+    latestStateVersion = incomingVersion;
+    const applyToken = ++stateApplyToken;
+    const previousState = lastState;
+
+    clearSelection();
+
+    const moveOverlay = getMoveOverlay(data, previousState);
+    if (moveOverlay) {
+      lastMove = moveOverlay;
+    } else if (!data.last_mover) {
+      lastMove = null;
+    }
+
+    if (shouldAnimateRoll(data)) {
+      inputLocked = true;
+      lastState = previousState || data;
+      statusEl.textContent = "Rolling die...";
+      turnBtn.disabled = true;
+      resignBtn.disabled = true;
+      setDieColor(data.turn);
+
+      animateRoll(data.roll, function () {
+        if (applyToken !== stateApplyToken) {
+          return;
+        }
+        inputLocked = false;
+        hopPos = null;
+        lastState = data;
+        hideDie();
+        if (data.no_legal_move) {
+          setTransientStatus("No legal move. Turn passed.", 1600);
+        }
+        drawBoard();
+        updateStatus();
+      });
+      return;
+    }
+
+    if (shouldAnimateOpponentMove(data, previousState)) {
+      inputLocked = true;
+      lastState = previousState || data;
+      turnBtn.disabled = true;
+      resignBtn.disabled = true;
+
+      hopPiece(
+        data.last_mover,
+        data.moved_piece,
+        data.path,
+        function () {
+          if (applyToken !== stateApplyToken) {
+            return;
+          }
+          inputLocked = false;
+          hopPos = null;
+          hideDie();
+          lastState = data;
+          drawBoard();
+          updateStatus();
+        },
+        applyToken,
+        180,
+        150
+      );
+      return;
+    }
+
+    inputLocked = false;
+    hopPos = null;
+    hideDie();
+    if (data.no_legal_move) {
+      setTransientStatus("No legal move. Turn passed.", 1600);
+    }
+    lastState = data;
+    drawBoard();
+    updateStatus();
+  }
+
+  function handleBoardClick(event) {
+    if (!canSelectPieces()) {
+      return;
+    }
+
+    // Clicking the track die at the base of the arrow cancels the current
+    // selection and returns to the "select a piece" phase.
+    if (Number.isInteger(selectedPiece) && eventHitsTrackDie(event)) {
+      clearSelection();
+      drawBoard();
+      updateStatus();
+      return;
+    }
+
+    const cell = eventToCanonicalCell(event);
+    if (!isCell(cell)) {
+      return;
+    }
+
+    const myDisks = roleDisks(lastState, myRole);
+    let piece = -1;
+    for (let i = 0; i < myDisks.length; i++) {
+      if (sameCell(myDisks[i], cell)) {
+        piece = i;
+        break;
+      }
+    }
+    if (piece < 0) {
+      return;
+    }
+
+    const previews = Array.isArray(lastState.previews) ? lastState.previews : [];
+    const preview = previews[piece];
+    if (!preview || !Array.isArray(preview.path) || preview.path.length === 0) {
+      return;
+    }
+
+    const applyToken = stateApplyToken;
+    if (preview.legal) {
+      selectedPiece = piece;
+      previewPos = null;
+      previewMove = {
+        mover: myRole,
+        roll: lastState.roll,
+        track: [myDisks[piece]].concat(preview.path.filter(isCell)),
+      };
+      illegalOverlay = null;
+      hopPos = null;
+      inputLocked = true;
+      drawBoard();
+      updateStatus();
+
+      hopPiece(
+        myRole,
+        piece,
+        preview.path,
+        function () {
+          if (applyToken !== stateApplyToken) {
+            return;
+          }
+          inputLocked = false;
+          hopPos = null;
+          previewPos = {
+            role: myRole,
+            pieceIndex: piece,
+            pos: preview.path[preview.path.length - 1],
+          };
+          drawBoard();
+          updateStatus();
+        },
+        applyToken,
+        160,
+        110
+      );
+      return;
+    }
+
+    // User-requested behavior: illegal click clears any prior valid selection.
+    clearSelection();
+    inputLocked = true;
+    drawBoard();
+    updateStatus();
+
+    previewRebound(
+      myRole,
+      piece,
+      preview.path,
+      function () {
+        if (applyToken !== stateApplyToken) {
+          return;
+        }
+        inputLocked = false;
+        drawBoard();
+        updateStatus();
+      },
+      applyToken
+    );
   }
 
   function handleMessage(data) {
     switch (data.type) {
       case "welcome":
         myRole = data.role;
+        clearSelection();
         lastMove = null;
         drawBoard();
         updateStatus();
         break;
       case "state":
-        {
-          const previousState = lastState;
-          const moveOverlay = getMoveOverlay(data, previousState);
-          if (moveOverlay) {
-            lastMove = moveOverlay;
-          } else if (!data.last_mover) {
-            lastMove = null;
-          }
-
-          const shouldAnimateMine =
-            awaitingRoll &&
-            data.last_mover === myRole &&
-            typeof data.roll === "number" &&
-            data.roll >= 1 &&
-            data.roll <= 6 &&
-            Array.isArray(data.path) &&
-            data.path.length > 0;
-
-          const mover = data.last_mover;
-          const moverChanged =
-            (mover === "host" || mover === "guest") &&
-            previousState &&
-            previousState.disks &&
-            data.disks &&
-            Array.isArray(previousState.disks[mover]) &&
-            Array.isArray(data.disks[mover]) &&
-            (previousState.disks[mover][0] !== data.disks[mover][0] ||
-              previousState.disks[mover][1] !== data.disks[mover][1]);
-
-          const shouldAnimateOpponent =
-            !awaitingRoll &&
-            moverChanged &&
-            mover !== myRole &&
-            Array.isArray(data.path) &&
-            data.path.length > 0;
-
-          if (shouldAnimateMine) {
-            const finalState = data;
-            lastState = previousState || data;
-            statusEl.textContent = "Rolling die...";
-            turnBtn.disabled = true;
-            resignBtn.disabled = true;
-
-            animateRoll(finalState.roll, function () {
-              hopPiece(finalState.last_mover, finalState.path, function () {
-                awaitingRoll = false;
-                hopPos = null;
-                lastState = finalState;
-                hideDie();
-                drawBoard();
-                updateStatus();
-              });
-            });
-          } else if (shouldAnimateOpponent) {
-            const finalState = data;
-            lastState = previousState;
-            turnBtn.disabled = true;
-            resignBtn.disabled = true;
-
-            hopPiece(finalState.last_mover, finalState.path, function () {
-              awaitingRoll = false;
-              hopPos = null;
-              hideDie();
-              lastState = finalState;
-              drawBoard();
-              updateStatus();
-            });
-          } else {
-            awaitingRoll = false;
-            hopPos = null;
-            hideDie();
-            lastState = data;
-            drawBoard();
-            updateStatus();
-          }
-        }
+        handleState(data);
         break;
       case "game_over":
-        awaitingRoll = false;
+        clearSelection();
+        inputLocked = false;
         hopPos = null;
         hideDie();
         turnBtn.disabled = true;
@@ -703,28 +1356,49 @@
     };
   }
 
-  function send(action) {
+  function send(payload) {
     if (socket && socket.readyState === WebSocket.OPEN) {
-      socket.send(JSON.stringify({ action: action }));
+      socket.send(JSON.stringify(payload));
       return true;
     }
     return false;
   }
 
   turnBtn.addEventListener("click", function () {
-    if (turnBtn.disabled || awaitingRoll) {
+    if (turnBtn.disabled || inputLocked || !lastState) {
       return;
     }
-    if (!send("take_turn")) {
+    if (lastState.status !== "playing" || lastState.turn !== myRole) {
       return;
     }
-    awaitingRoll = true;
-    turnBtn.disabled = true;
-    statusEl.textContent = "Rolling die...";
+
+    if (lastState.phase === "roll") {
+      if (!send({ action: "roll_die" })) {
+        return;
+      }
+      inputLocked = true;
+      turnBtn.disabled = true;
+      resignBtn.disabled = true;
+      statusEl.textContent = "Rolling die...";
+      return;
+    }
+
+    if (lastState.phase === "select" && Number.isInteger(selectedPiece)) {
+      if (!send({ action: "confirm_move", piece: selectedPiece })) {
+        return;
+      }
+      inputLocked = true;
+      turnBtn.disabled = true;
+      resignBtn.disabled = true;
+      statusEl.textContent = "Confirming move...";
+    }
   });
+
   resignBtn.addEventListener("click", function () {
-    send("resign");
+    send({ action: "resign" });
   });
+
+  canvas.addEventListener("click", handleBoardClick);
 
   drawBoard();
   connect();

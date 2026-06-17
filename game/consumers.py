@@ -7,8 +7,9 @@ Realtime fan-out uses the in-memory channel layer. Two groups exist:
 * ``room_<id>``     - the (up to) two players in a single game; receives shared
                       game state and the game-over signal.
 
-The server is authoritative: clients only send intents (``take_turn`` /
-``resign``) and render whatever canonical state the server broadcasts back.
+The server is authoritative: clients only send intents (``roll_die`` /
+``confirm_move`` / ``resign``) and render whatever canonical state the server
+broadcasts back.
 """
 from __future__ import annotations
 
@@ -112,8 +113,11 @@ class GameConsumer(AsyncWebsocketConsumer):
             return
         action = data.get("action")
 
-        if action == "take_turn":
-            if store.take_turn(self.room_id, self.role) is not None:
+        if action == "roll_die":
+            if store.roll_die(self.room_id, self.role) is not None:
+                await self._broadcast_state()
+        elif action == "confirm_move":
+            if store.confirm_move(self.room_id, self.role, data.get("piece")) is not None:
                 await self._broadcast_state()
         elif action == "resign":
             room = store.resign(self.room_id, self.role)

@@ -20,6 +20,8 @@ from . import game_logic as gl
 WAITING = "waiting"  # host created the room, no opponent yet
 PLAYING = "playing"  # both players present, game in progress
 OVER = "over"  # game finished (a player resigned)
+PHASE_ROLL = "roll"  # active player can roll the die
+PHASE_SELECT = "select"  # active player must choose a piece to move
 
 
 @dataclass
@@ -29,11 +31,20 @@ class Room:
     guest_token: str | None = None
     status: str = WAITING
     turn: str | None = None  # gl.HOST or gl.GUEST while PLAYING
-    host_idx: int = gl.START_INDEX
-    guest_idx: int = gl.START_INDEX
+    phase: str = PHASE_ROLL
+    host_indices: list[int] = field(
+        default_factory=lambda: list(gl.START_INDICES)
+    )
+    guest_indices: list[int] = field(
+        default_factory=lambda: list(gl.START_INDICES)
+    )
+    pending_roll: int | None = None
     last_roll: int | None = None
     last_mover: str | None = None
+    last_moved_piece: int | None = None
+    no_legal_move: bool = False
     winner: str | None = None  # gl.HOST or gl.GUEST once OVER
+    state_version: int = 0  # Monotonic version for client stale-state guards.
     created_at: float = field(default_factory=time.time)
 
 
@@ -94,6 +105,7 @@ class GameStore:
                 room.guest_token = token
                 room.status = PLAYING
                 room.turn = secrets.choice((gl.HOST, gl.GUEST))
+                room.state_version += 1
                 return AttachResult(room, gl.GUEST, just_started=True)
             # Room is full and the token matches neither player.
             return AttachResult(room, None)
@@ -115,21 +127,71 @@ class GameStore:
         return False
 
     # -- moves -------------------------------------------------------------
-    def take_turn(self, room_id: str, role: str) -> Room | None:
-        """Roll a die, advance ``role`` by that many cells, then pass turn."""
+    def roll_die(self, room_id: str, role: str) -> Room | None:
+        """Roll for ``role`` and enter piece-selection, or auto-pass if blocked."""
         with self._lock:
             room = self._rooms.get(room_id)
-            if room is None or room.status != PLAYING or room.turn != role:
+            if (
+                room is None
+                or room.status != PLAYING
+                or room.turn != role
+                or room.phase != PHASE_ROLL
+            ):
                 return None
+
             roll = gl.roll_die()
-            if role == gl.HOST:
-                room.host_idx = gl.advance(room.host_idx, roll)
-                room.turn = gl.GUEST
-            else:
-                room.guest_idx = gl.advance(room.guest_idx, roll)
-                room.turn = gl.HOST
+            indices = self._indices_for_role(room, role)
+            legal_moves = gl.legal_piece_moves(indices, roll)
+
             room.last_roll = roll
             room.last_mover = role
+            room.last_moved_piece = None
+            room.pending_roll = None
+            room.no_legal_move = False
+
+            if legal_moves:
+                room.phase = PHASE_SELECT
+                room.pending_roll = roll
+            else:
+                room.phase = PHASE_ROLL
+                room.turn = gl.GUEST if role == gl.HOST else gl.HOST
+                room.no_legal_move = True
+
+            room.state_version += 1
+            return room
+
+    def confirm_move(self, room_id: str, role: str, piece: int) -> Room | None:
+        """Commit the selected piece move and pass turn."""
+        with self._lock:
+            room = self._rooms.get(room_id)
+            if (
+                room is None
+                or room.status != PLAYING
+                or room.turn != role
+                or room.phase != PHASE_SELECT
+                or not isinstance(room.pending_roll, int)
+                or not isinstance(piece, int)
+            ):
+                return None
+
+            indices = self._indices_for_role(room, role)
+            if piece < 0 or piece >= len(indices):
+                return None
+
+            legal_moves = gl.legal_piece_moves(indices, room.pending_roll)
+            if piece not in legal_moves:
+                return None
+
+            indices[piece] = gl.advance(indices[piece], room.pending_roll)
+
+            room.phase = PHASE_ROLL
+            room.turn = gl.GUEST if role == gl.HOST else gl.HOST
+            room.last_roll = room.pending_roll
+            room.last_mover = role
+            room.last_moved_piece = piece
+            room.pending_roll = None
+            room.no_legal_move = False
+            room.state_version += 1
             return room
 
     def resign(self, room_id: str, role: str) -> Room | None:
@@ -141,38 +203,96 @@ class GameStore:
             room.status = OVER
             room.winner = gl.GUEST if role == gl.HOST else gl.HOST
             room.turn = None
+            room.phase = PHASE_ROLL
+            room.pending_roll = None
+            room.state_version += 1
             return room
 
     # -- serialization -----------------------------------------------------
     @staticmethod
     def state_dict(room: Room) -> dict:
         """Shared game state broadcast to both clients (canonical coords)."""
-        host_r, host_c = gl.canonical_position(gl.HOST, room.host_idx)
-        guest_r, guest_c = gl.canonical_position(gl.GUEST, room.guest_idx)
+        host_disks = [
+            list(gl.canonical_position(gl.HOST, idx))
+            for idx in room.host_indices
+        ]
+        guest_disks = [
+            list(gl.canonical_position(gl.GUEST, idx))
+            for idx in room.guest_indices
+        ]
+
         path: list[list[int]] = []
         move_from: list[int] | None = None
-        if room.last_mover and room.last_roll:
-            mover_idx = room.host_idx if room.last_mover == gl.HOST else room.guest_idx
-            from_idx = gl.advance(mover_idx, -room.last_roll)
-            from_r, from_c = gl.canonical_position(room.last_mover, from_idx)
-            move_from = [from_r, from_c]
-            path = [
-                [r, c]
-                for (r, c) in gl.loop_path(room.last_mover, from_idx, room.last_roll)
-            ]
+        if (
+            room.last_mover
+            and room.last_roll
+            and isinstance(room.last_moved_piece, int)
+        ):
+            mover_indices = (
+                room.host_indices
+                if room.last_mover == gl.HOST
+                else room.guest_indices
+            )
+            if 0 <= room.last_moved_piece < len(mover_indices):
+                mover_idx = mover_indices[room.last_moved_piece]
+                from_idx = gl.advance(mover_idx, -room.last_roll)
+                from_r, from_c = gl.canonical_position(room.last_mover, from_idx)
+                move_from = [from_r, from_c]
+                path = [
+                    [r, c]
+                    for (r, c) in gl.loop_path(
+                        room.last_mover, from_idx, room.last_roll
+                    )
+                ]
+
+        previews: list[dict] = []
+        if (
+            room.status == PLAYING
+            and room.phase == PHASE_SELECT
+            and room.turn in (gl.HOST, gl.GUEST)
+            and isinstance(room.pending_roll, int)
+        ):
+            turn_indices = (
+                room.host_indices if room.turn == gl.HOST else room.guest_indices
+            )
+            legal = set(gl.legal_piece_moves(turn_indices, room.pending_roll))
+            for piece, idx in enumerate(turn_indices):
+                previews.append(
+                    {
+                        "legal": piece in legal,
+                        "path": [
+                            [r, c]
+                            for (r, c) in gl.loop_path(
+                                room.turn, idx, room.pending_roll
+                            )
+                        ],
+                    }
+                )
+
+        roll = room.pending_roll if room.phase == PHASE_SELECT else room.last_roll
+
         return {
+            "version": room.state_version,
             "status": room.status,
             "turn": room.turn,
+            "phase": room.phase,
             "winner": room.winner,
-            "roll": room.last_roll,
+            "roll": roll,
             "last_mover": room.last_mover,
+            "moved_piece": room.last_moved_piece,
+            "no_legal_move": room.no_legal_move,
+            "previews": previews,
             "move_from": move_from,
             "path": path,
             "disks": {
-                "host": [host_r, host_c],
-                "guest": [guest_r, guest_c],
+                "host": host_disks,
+                "guest": guest_disks,
             },
         }
+
+    @staticmethod
+    def _indices_for_role(room: Room, role: str) -> list[int]:
+        return room.host_indices if role == gl.HOST else room.guest_indices
 
     # -- internals ---------------------------------------------------------
     def _new_id(self) -> str:

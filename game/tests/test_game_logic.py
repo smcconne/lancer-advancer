@@ -10,6 +10,8 @@ class GameLogicTests(SimpleTestCase):
     def test_loop_basics(self):
         self.assertEqual(gl.LOOP_LEN, 12)
         self.assertEqual(gl.LOCAL_LOOP[0], (3, 5))  # bottom-right start
+        self.assertEqual(gl.START_INDICES, [0, 11, 10, 9])
+        self.assertEqual(gl.NUM_PIECES, 4)
         # No duplicate cells in the loop.
         self.assertEqual(len(set(gl.LOCAL_LOOP)), 12)
 
@@ -33,12 +35,20 @@ class GameLogicTests(SimpleTestCase):
         self.assertEqual(gl.canonical_loop(gl.GUEST), expected)
 
     def test_start_positions(self):
-        # Each player's disk starts in their own bottom-right corner.
+        # Each player's four disks start along their own bottom-right row.
         self.assertEqual(
-            gl.canonical_position(gl.HOST, gl.START_INDEX), (3, 5)
+            [
+                gl.canonical_position(gl.HOST, idx)
+                for idx in gl.START_INDICES
+            ],
+            [(3, 5), (3, 4), (3, 3), (3, 2)],
         )
         self.assertEqual(
-            gl.canonical_position(gl.GUEST, gl.START_INDEX), (0, 0)
+            [
+                gl.canonical_position(gl.GUEST, idx)
+                for idx in gl.START_INDICES
+            ],
+            [(0, 0), (0, 1), (0, 2), (0, 3)],
         )
 
     def test_guest_start_is_bottom_right_in_local_view(self):
@@ -82,3 +92,15 @@ class GameLogicTests(SimpleTestCase):
             r1, c1 = loop[i]
             r2, c2 = loop[(i + 1) % gl.LOOP_LEN]
             self.assertEqual(abs(r1 - r2) + abs(c1 - c2), 1)
+
+    def test_legal_piece_moves_single_legal_from_start(self):
+        # Roll=1 from [0,11,10,9] only allows piece 0 -> index 1.
+        self.assertEqual(gl.legal_piece_moves([0, 11, 10, 9], 1), [0])
+
+    def test_legal_piece_moves_three_legal_from_start(self):
+        # Roll=3 targets [3,2,1,0]; last target is occupied by piece 0.
+        self.assertEqual(gl.legal_piece_moves([0, 11, 10, 9], 3), [0, 1, 2])
+
+    def test_legal_piece_moves_none_legal(self):
+        # Every target is occupied by another own piece.
+        self.assertEqual(gl.legal_piece_moves([0, 3, 6, 9], 3), [])
