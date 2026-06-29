@@ -104,3 +104,38 @@ class GameLogicTests(SimpleTestCase):
     def test_legal_piece_moves_none_legal(self):
         # Every target is occupied by another own piece.
         self.assertEqual(gl.legal_piece_moves([0, 3, 6, 9], 3), [])
+
+    def test_roll_dice_returns_two_values(self):
+        with patch("game.game_logic.secrets.randbelow", side_effect=[2, 5]):
+            self.assertEqual(gl.roll_dice(), [3, 6])
+
+    def test_can_stage_blocks_same_die_or_piece(self):
+        indices = [0, 11, 10, 9]
+        dice = [2, 4]
+        # First assignment is fine.
+        self.assertTrue(gl.can_stage(indices, dice, {}, 0, 0))
+        # Same die can't be reused; same piece can't take two dice.
+        self.assertFalse(gl.can_stage(indices, dice, {0: 0}, 1, 0))
+        self.assertFalse(gl.can_stage(indices, dice, {0: 0}, 0, 1))
+
+    def test_second_piece_may_land_on_first_piece_start(self):
+        # Piece 0 at idx 0 takes die0=2 -> idx2. Piece 1 at idx10 takes die1=2
+        # -> idx0 (piece 0's vacated start) which is now free, so it is legal.
+        indices = [0, 11, 10, 9]
+        dice = [2, 2]
+        self.assertTrue(gl.can_stage(indices, dice, {0: 0}, 2, 1))
+
+    def test_unstage_first_makes_second_collide(self):
+        # With both staged the pair is collision-free, but if piece 0 is
+        # removed, piece 2's destination (idx0) collides with piece 0's start.
+        indices = [0, 11, 10, 9]
+        dice = [2, 2]
+        staged = {0: 0, 2: 1}
+        self.assertEqual(gl.staged_collisions(indices, dice, staged), set())
+        del staged[0]
+        self.assertEqual(gl.staged_collisions(indices, dice, staged), {2})
+
+    def test_has_any_legal_assignment(self):
+        self.assertTrue(gl.has_any_legal_assignment([0, 11, 10, 9], [1, 2], {}))
+        self.assertFalse(gl.has_any_legal_assignment([0, 3, 6, 9], [3, 3], {}))
+

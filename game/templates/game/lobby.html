@@ -25,6 +25,7 @@
   {% csrf_token %}
   <script>
     window.CSRF_TOKEN = "{{ csrf_token }}";
+    window.SERVER_BUILD_ID = "{{ build_id|escapejs }}";
   </script>
   <script src="{% static 'game/js/lobby.js' %}"></script>
 </body>

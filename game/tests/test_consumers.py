@@ -60,7 +60,10 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         self.assertEqual(playing["status"], "playing")
         self.assertIn(playing["turn"], ("host", "guest"))
         self.assertEqual(playing["phase"], "roll")
-        self.assertIsNone(playing["roll"])
+        self.assertIsNone(playing["dice"])
+        self.assertEqual(playing["staged"], [])
+        self.assertFalse(playing["can_confirm"])
+        self.assertFalse(playing["can_pass"])
         self.assertIsNone(playing["last_mover"])
         self.assertIsNone(playing["moved_piece"])
         self.assertFalse(playing["no_legal_move"])
@@ -79,65 +82,64 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         await host.disconnect()
         await guest.disconnect()
 
-    async def test_roll_die_enters_selection_phase(self):
+    async def test_roll_dice_enters_selection_phase(self):
         _, host, guest, playing = await self._start_game()
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        with patch("game.game_logic.roll_die", return_value=4):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[4, 2]):
+            await comm.send_json_to({"action": "roll_dice"})
             state = await recv_until(host, "state")
             await recv_until(guest, "state")  # opponent sees it too
 
         self.assertEqual(state["turn"], mover)
         self.assertEqual(state["phase"], "select")
-        self.assertEqual(state["roll"], 4)
+        self.assertEqual(state["dice"], [4, 2])
+        self.assertEqual(state["staged"], [])
+        self.assertFalse(state["can_pass"])
+        self.assertFalse(state["can_confirm"])
         self.assertEqual(state["last_mover"], mover)
-        self.assertIsNone(state["moved_piece"])
         self.assertFalse(state["no_legal_move"])
-        self.assertIsNone(state["move_from"])
-        self.assertEqual(state["path"], [])
         self.assertEqual(len(state["previews"]), 4)
-        self.assertTrue(all(p["legal"] for p in state["previews"]))
-        self.assertTrue(all(len(p["path"]) == 4 for p in state["previews"]))
+        self.assertTrue(all(len(p["dice"]) == 2 for p in state["previews"]))
 
         await host.disconnect()
         await guest.disconnect()
 
-    async def test_confirm_move_advances_and_alternates(self):
+    async def test_stage_and_confirm_advances_and_alternates(self):
         _, host, guest, playing = await self._start_game()
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        with patch("game.game_logic.roll_die", return_value=4):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[4, 3]):
+            await comm.send_json_to({"action": "roll_dice"})
             await recv_until(host, "state")
             await recv_until(guest, "state")
 
-        await comm.send_json_to({"action": "confirm_move", "piece": 1})
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        staged_state = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertTrue(staged_state["can_confirm"])
+
+        await comm.send_json_to({"action": "confirm_moves"})
         state = await recv_until(host, "state")
         await recv_until(guest, "state")
 
         self.assertEqual(state["phase"], "roll")
         self.assertEqual(state["turn"], "guest" if mover == "host" else "host")
-        self.assertEqual(state["roll"], 4)
-        self.assertEqual(state["last_mover"], mover)
-        self.assertEqual(state["moved_piece"], 1)
-        self.assertFalse(state["no_legal_move"])
+        self.assertIsNone(state["dice"])
 
         expected_indices = list(gl.START_INDICES)
-        expected_indices[1] = gl.advance(expected_indices[1], 4)
+        expected_indices[0] = gl.advance(expected_indices[0], 4)
+        expected_indices[1] = gl.advance(expected_indices[1], 3)
         expected_disks = [
             list(gl.canonical_position(mover, idx))
             for idx in expected_indices
         ]
         self.assertEqual(state["disks"][mover], expected_disks)
-        self.assertEqual(
-            state["move_from"],
-            list(gl.canonical_position(mover, gl.START_INDICES[1])),
-        )
-        self.assertEqual(len(state["path"]), 4)
-        self.assertEqual(state["path"][-1], expected_disks[1])
 
         await host.disconnect()
         await guest.disconnect()
@@ -150,15 +152,15 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        with patch("game.game_logic.roll_die", return_value=2):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[2, 5]):
+            await comm.send_json_to({"action": "roll_dice"})
             state_after_roll = await recv_until(host, "state")
             await recv_until(guest, "state")
 
         self.assertGreater(state_after_roll["version"], first_version)
         self.assertEqual(state_after_roll["phase"], "select")
 
-        await comm.send_json_to({"action": "confirm_move", "piece": 0})
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
         state_after_confirm = await recv_until(host, "state")
         await recv_until(guest, "state")
 
@@ -172,7 +174,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         waiter = "guest" if playing["turn"] == "host" else "host"
         comm = host if waiter == "host" else guest
 
-        await comm.send_json_to({"action": "roll_die"})
+        await comm.send_json_to({"action": "roll_dice"})
         # Nothing should be broadcast for an illegal move.
         self.assertTrue(await comm.receive_nothing(timeout=0.3))
 
@@ -184,24 +186,24 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        await comm.send_json_to({"action": "confirm_move", "piece": 0})
+        await comm.send_json_to({"action": "confirm_moves"})
         self.assertTrue(await comm.receive_nothing(timeout=0.3))
 
         await host.disconnect()
         await guest.disconnect()
 
-    async def test_illegal_piece_confirm_is_ignored(self):
+    async def test_illegal_stage_is_ignored(self):
         _, host, guest, playing = await self._start_game()
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        with patch("game.game_logic.roll_die", return_value=1):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[1, 1]):
+            await comm.send_json_to({"action": "roll_dice"})
             await recv_until(host, "state")
             await recv_until(guest, "state")
 
-        # From [0,11,10,9] with roll=1 only piece 0 is legal.
-        await comm.send_json_to({"action": "confirm_move", "piece": 1})
+        # From [0,11,10,9] with die=1 only piece 0 can move; piece 1 is blocked.
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 0})
         self.assertTrue(await comm.receive_nothing(timeout=0.3))
 
         await host.disconnect()
@@ -212,18 +214,18 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         mover = playing["turn"]
         comm = host if mover == "host" else guest
 
-        with patch("game.game_logic.roll_die", return_value=4):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[4, 2]):
+            await comm.send_json_to({"action": "roll_dice"})
             await recv_until(host, "state")
             await recv_until(guest, "state")
 
-        await comm.send_json_to({"action": "roll_die"})
+        await comm.send_json_to({"action": "roll_dice"})
         self.assertTrue(await comm.receive_nothing(timeout=0.3))
 
         await host.disconnect()
         await guest.disconnect()
 
-    async def test_no_legal_move_auto_passes_turn(self):
+    async def test_no_legal_move_allows_pass(self):
         room, host, guest, playing = await self._start_game()
         mover = playing["turn"]
         comm = host if mover == "host" else guest
@@ -235,23 +237,72 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         else:
             state.guest_indices = blocked[:]
 
-        with patch("game.game_logic.roll_die", return_value=3):
-            await comm.send_json_to({"action": "roll_die"})
+        with patch("game.game_logic.roll_dice", return_value=[3, 3]):
+            await comm.send_json_to({"action": "roll_dice"})
             after = await recv_until(host, "state")
             await recv_until(guest, "state")
 
-        self.assertEqual(after["phase"], "roll")
-        self.assertEqual(after["turn"], "guest" if mover == "host" else "host")
-        self.assertEqual(after["roll"], 3)
-        self.assertEqual(after["last_mover"], mover)
-        self.assertIsNone(after["moved_piece"])
+        self.assertEqual(after["phase"], "select")
         self.assertTrue(after["no_legal_move"])
-        self.assertEqual(after["previews"], [])
-        self.assertIsNone(after["move_from"])
-        self.assertEqual(after["path"], [])
+        self.assertTrue(after["can_pass"])
 
-        expected = [list(gl.canonical_position(mover, idx)) for idx in blocked]
-        self.assertEqual(after["disks"][mover], expected)
+        await comm.send_json_to({"action": "pass_turn"})
+        passed = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertEqual(passed["phase"], "roll")
+        self.assertEqual(passed["turn"], "guest" if mover == "host" else "host")
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_pass_is_ignored_while_legal_assignment_exists(self):
+        _, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+
+        with patch("game.game_logic.roll_dice", return_value=[4, 2]):
+            await comm.send_json_to({"action": "roll_dice"})
+            after_roll = await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        self.assertFalse(after_roll["can_pass"])
+
+        await comm.send_json_to({"action": "pass_turn"})
+        self.assertTrue(await comm.receive_nothing(timeout=0.3))
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_pass_allowed_when_second_die_has_no_remaining_placement(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+
+        state = store.get(room.id)
+        constrained = [0, 1, 2, 3]
+        if mover == "host":
+            state.host_indices = constrained[:]
+        else:
+            state.guest_indices = constrained[:]
+
+        with patch("game.game_logic.roll_dice", return_value=[1, 4]):
+            await comm.send_json_to({"action": "roll_dice"})
+            after_roll = await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        self.assertFalse(after_roll["can_pass"])
+
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 1})
+        staged = await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        self.assertTrue(staged["can_pass"])
+
+        await comm.send_json_to({"action": "pass_turn"})
+        passed = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertEqual(passed["phase"], "roll")
+        self.assertEqual(passed["turn"], "guest" if mover == "host" else "host")
 
         await host.disconnect()
         await guest.disconnect()

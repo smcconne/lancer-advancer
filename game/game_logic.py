@@ -95,6 +95,70 @@ def roll_die() -> int:
     return secrets.randbelow(6) + 1
 
 
+def roll_dice() -> list[int]:
+    """Return two independent uniformly random dice, each in [1, 6]."""
+    return [roll_die(), roll_die()]
+
+
+def staged_collisions(
+    indices: list[int], dice: list[int], staged: dict[int, int]
+) -> set[int]:
+    """Pieces whose staged destination collides with another piece.
+
+    ``staged`` maps a piece slot to the index of the die assigned to it. Staged
+    pieces move to their final cell (their start cell is vacated); unstaged
+    pieces stay put. A staged piece is colliding if its final cell matches any
+    other piece's projected position.
+    """
+    finals: dict[int, int] = {}
+    for piece, idx in enumerate(indices):
+        die_index = staged.get(piece)
+        finals[piece] = advance(idx, dice[die_index]) if die_index is not None else idx
+
+    collisions: set[int] = set()
+    for piece in staged:
+        target = finals[piece]
+        if any(other != piece and dest == target for other, dest in finals.items()):
+            collisions.add(piece)
+    return collisions
+
+
+def can_stage(
+    indices: list[int],
+    dice: list[int],
+    staged: dict[int, int],
+    piece: int,
+    die_index: int,
+) -> bool:
+    """Whether ``die_index`` may be assigned to ``piece`` given current staging.
+
+    Each die and each piece may be used at most once, and the move must not
+    collide once both dice are projected to their final cells.
+    """
+    if piece < 0 or piece >= len(indices):
+        return False
+    if die_index < 0 or die_index >= len(dice):
+        return False
+    if piece in staged or die_index in staged.values():
+        return False
+    trial = dict(staged)
+    trial[piece] = die_index
+    return piece not in staged_collisions(indices, dice, trial)
+
+
+def has_any_legal_assignment(
+    indices: list[int], dice: list[int], staged: dict[int, int]
+) -> bool:
+    """True if any unused die can still be staged on any free piece."""
+    for die_index in range(len(dice)):
+        if die_index in staged.values():
+            continue
+        for piece in range(len(indices)):
+            if can_stage(indices, dice, staged, piece, die_index):
+                return True
+    return False
+
+
 def loop_path(role: str, from_idx: int, steps: int) -> list[tuple[int, int]]:
     """Canonical cells visited after ``steps`` moves from ``from_idx``.
 

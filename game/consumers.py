@@ -7,20 +7,63 @@ Realtime fan-out uses the in-memory channel layer. Two groups exist:
 * ``room_<id>``     - the (up to) two players in a single game; receives shared
                       game state and the game-over signal.
 
-The server is authoritative: clients only send intents (``roll_die`` /
-``confirm_move`` / ``resign``) and render whatever canonical state the server
-broadcasts back.
+The server is authoritative: clients only send intents (``roll_dice`` /
+``stage_move`` / ``unstage_move`` / ``confirm_moves`` / ``pass_turn`` /
+``resign``) and render whatever canonical state the server broadcasts back.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from urllib.parse import parse_qs
 
 from channels.generic.websocket import AsyncWebsocketConsumer
+from django.conf import settings
 
 from .store import store
+from .version import current_build_id
 
 LOBBY_GROUP = "lobby"
+
+
+async def _heartbeat(consumer):
+    """Periodically ping a client with the current build id.
+
+    Doubles as a keepalive and lets the client notice both a silently dropped
+    connection (no ping arrives) and a server deploy (the build id changes).
+    """
+    try:
+        while True:
+            await asyncio.sleep(settings.HEARTBEAT_SECONDS)
+            await consumer.send(
+                text_data=json.dumps(
+                    {"type": "ping", "build_id": current_build_id()}
+                )
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Socket went away between checks; nothing useful to do here.
+        return
+
+
+async def _send_server_info(consumer):
+    await consumer.send(
+        text_data=json.dumps(
+            {"type": "server_info", "build_id": current_build_id()}
+        )
+    )
+
+
+def _start_heartbeat(consumer):
+    consumer._heartbeat_task = asyncio.ensure_future(_heartbeat(consumer))
+
+
+def _stop_heartbeat(consumer):
+    task = getattr(consumer, "_heartbeat_task", None)
+    if task is not None:
+        task.cancel()
+        consumer._heartbeat_task = None
 
 
 class LobbyConsumer(AsyncWebsocketConsumer):
@@ -29,9 +72,12 @@ class LobbyConsumer(AsyncWebsocketConsumer):
     async def connect(self):
         await self.channel_layer.group_add(LOBBY_GROUP, self.channel_name)
         await self.accept()
+        await _send_server_info(self)
         await self._send_rooms()
+        _start_heartbeat(self)
 
     async def disconnect(self, code):
+        _stop_heartbeat(self)
         await self.channel_layer.group_discard(LOBBY_GROUP, self.channel_name)
 
     # Group event: something changed, re-read and push the fresh list.
@@ -59,6 +105,11 @@ class GameConsumer(AsyncWebsocketConsumer):
 
         await self.accept()
 
+        # Announce the build id before any validation so even a rejected
+        # connection (e.g. the room vanished on a redeploy) lets the client
+        # detect the new build and reload instead of just erroring out.
+        await _send_server_info(self)
+
         if not self.token:
             await self._send_error("missing token")
             await self.close()
@@ -76,6 +127,7 @@ class GameConsumer(AsyncWebsocketConsumer):
 
         self.role = result.role
         await self.channel_layer.group_add(self.group, self.channel_name)
+        _start_heartbeat(self)
 
         # Private message so this client learns which side it is playing.
         await self.send(
@@ -96,6 +148,7 @@ class GameConsumer(AsyncWebsocketConsumer):
             await self._send_state_to_self()
 
     async def disconnect(self, code):
+        _stop_heartbeat(self)
         if not getattr(self, "role", None):
             return
         await self.channel_layer.group_discard(self.group, self.channel_name)
@@ -113,11 +166,25 @@ class GameConsumer(AsyncWebsocketConsumer):
             return
         action = data.get("action")
 
-        if action == "roll_die":
-            if store.roll_die(self.room_id, self.role) is not None:
+        if action == "pong":
+            # Client heartbeat reply; nothing to do.
+            return
+        if action == "roll_dice":
+            if store.roll_dice(self.room_id, self.role) is not None:
                 await self._broadcast_state()
-        elif action == "confirm_move":
-            if store.confirm_move(self.room_id, self.role, data.get("piece")) is not None:
+        elif action == "stage_move":
+            if store.stage_move(
+                self.room_id, self.role, data.get("piece"), data.get("die_index")
+            ) is not None:
+                await self._broadcast_state()
+        elif action == "unstage_move":
+            if store.unstage_move(self.room_id, self.role, data.get("piece")) is not None:
+                await self._broadcast_state()
+        elif action == "confirm_moves":
+            if store.confirm_moves(self.room_id, self.role) is not None:
+                await self._broadcast_state()
+        elif action == "pass_turn":
+            if store.pass_turn(self.room_id, self.role) is not None:
                 await self._broadcast_state()
         elif action == "resign":
             room = store.resign(self.room_id, self.role)

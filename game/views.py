@@ -9,12 +9,13 @@ from django.views.decorators.http import require_GET, require_POST
 
 from .consumers import LOBBY_GROUP
 from .store import store
+from .version import current_build_id
 
 
 @require_GET
 def lobby(request):
     """Landing page: Host button + live list of joinable rooms."""
-    return render(request, "game/lobby.html")
+    return render(request, "game/lobby.html", {"build_id": current_build_id()})
 
 
 @require_POST
@@ -43,4 +44,8 @@ def host(request):
 def game(request, room_id: str):
     """Render the game board. Validity of the room is resolved over the
     WebSocket connection, so unknown ids still render and then show an error."""
-    return render(request, "game/game.html", {"room_id": room_id})
+    return render(
+        request,
+        "game/game.html",
+        {"room_id": room_id, "build_id": current_build_id()},
+    )

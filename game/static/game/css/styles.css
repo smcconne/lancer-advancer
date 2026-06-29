@@ -114,6 +114,55 @@ h2 {
   left: 66.67%;
 }
 
+.dice-tray {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.turn-roll-indicator.die--draggable {
+  cursor: grab;
+  touch-action: none;
+}
+
+.turn-roll-indicator.die--staged {
+  opacity: 0.4;
+  filter: grayscale(0.4);
+}
+
+/* During the roll phase, force both dice greyed out when it's the opponent's
+   turn to roll, and fully active on your own turn, regardless of any other
+   active/inactive (staged/draggable) state. */
+.turn-roll-indicator.die--roll-dim {
+  opacity: 0.4 !important;
+  filter: grayscale(0.4) !important;
+}
+
+.turn-roll-indicator.die--roll-active {
+  opacity: 1 !important;
+  filter: none !important;
+}
+
+.die-ghost {
+  position: fixed;
+  width: 3rem;
+  height: 3rem;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  z-index: 1000;
+  opacity: 0.9;
+  cursor: grabbing;
+}
+
+.btn-secondary {
+  background: #475569;
+  color: #f8fafc;
+}
+
+.btn.hidden {
+  display: none;
+}
+
 .btn-danger {
   background: var(--red);
 }
@@ -219,6 +268,17 @@ h2 {
 
 .die.hidden {
   display: none;
+}
+
+/* Two dice roll side by side over the board, kept a fixed distance apart. */
+#die {
+  left: 50%;
+  transform: translate(calc(-50% - 54px), -50%);
+}
+
+#die-2 {
+  left: 50%;
+  transform: translate(calc(-50% + 54px), -50%);
 }
 
 .die__cube {
@@ -329,9 +389,20 @@ h2 {
 
 .controls {
   margin-top: 1.25rem;
-  display: flex;
-  gap: 0.75rem;
+  display: grid;
+  grid-template-columns: max-content max-content;
+  column-gap: 0.75rem;
+  row-gap: 0.75rem;
   justify-content: center;
+  align-items: center;
+}
+
+.controls-row {
+  display: contents;
+}
+
+.controls-row-split {
+  display: contents;
 }
 
 /* ---- Overlay / popup ---- */

@@ -16,6 +16,7 @@
 
     <div class="board-wrap">
       <canvas id="board" width="480" height="320"></canvas>
+      <div class="dice-3d">
       <div id="die" class="die hidden" aria-hidden="true">
         <div class="die__cube">
           <div class="die__face die__face--1 side front">
@@ -58,12 +59,21 @@
           </div>
         </div>
       </div>
+      </div>
     </div>
 
     <div class="controls">
-      <span id="turn-roll-indicator" class="turn-roll-indicator hidden" aria-hidden="true"></span>
-      <button id="turn-btn" class="btn btn-primary" disabled>Roll Die</button>
-      <button id="resign-btn" class="btn btn-danger" disabled>Resign</button>
+      <div class="controls-row">
+        <span id="dice-tray" class="dice-tray">
+          <span id="turn-roll-indicator" class="turn-roll-indicator hidden" aria-hidden="true"></span>
+          <span id="turn-roll-indicator-2" class="turn-roll-indicator hidden" aria-hidden="true"></span>
+        </span>
+        <button id="turn-btn" class="btn btn-primary" disabled>Roll Dice</button>
+      </div>
+      <div class="controls-row controls-row-split">
+        <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
+        <button id="resign-btn" class="btn btn-danger" disabled>Resign</button>
+      </div>
     </div>
   </main>
 
@@ -78,6 +88,10 @@
 
   <script>
     window.ROOM_ID = "{{ room_id|escapejs }}";
+    window.SERVER_BUILD_ID = "{{ build_id|escapejs }}";
+    window.LANCE_BG_URL = "{% static 'game/img/lance_background.svg' %}";
+    window.HELMET_BG_URL = "{% static 'game/img/helmet-background.svg' %}";
+    window.CHECK_BG_URL = "{% static 'game/img/check-background.svg' %}";
   </script>
   <script src="{% static 'game/js/game.js' %}"></script>
 </body>

@@ -23,6 +23,20 @@
   const listEl = document.getElementById("room-list");
   const hostBtn = document.getElementById("host-btn");
 
+  // Build id this page was served with. If the live server ever reports a
+  // different one, it was redeployed and we reload to pick up fresh assets.
+  const pageBuildId = window.SERVER_BUILD_ID || "";
+  let reloading = false;
+
+  function checkBuild(buildId) {
+    if (reloading || !buildId || !pageBuildId || buildId === pageBuildId) {
+      return false;
+    }
+    reloading = true;
+    location.reload();
+    return true;
+  }
+
   // ---- Render the list of joinable rooms ----
   function renderRooms(rooms) {
     listEl.textContent = "";
@@ -56,12 +70,18 @@
     const socket = new WebSocket(wsUrl("/ws/lobby/"));
     socket.onmessage = function (event) {
       const data = JSON.parse(event.data);
+      if (checkBuild(data.build_id)) {
+        return;
+      }
       if (data.type === "rooms") {
         renderRooms(data.rooms);
       }
     };
     // Reconnect if the socket drops (e.g. server restart).
     socket.onclose = function () {
+      if (reloading) {
+        return;
+      }
       setTimeout(connect, 1500);
     };
   }

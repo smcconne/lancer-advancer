@@ -15,6 +15,8 @@
   const COLS = 6;
   const ROWS = 4;
   const CELL = 80; // canvas is 480x320 in its own coordinate space
+  const LOGICAL_W = COLS * CELL; // 480 logical drawing units wide
+  const LOGICAL_H = ROWS * CELL; // 320 logical drawing units tall
 
   function getToken() {
     let token = localStorage.getItem("la_token");
@@ -35,21 +37,135 @@
   const token = getToken();
   const roomId = window.ROOM_ID;
 
+  // Server-update detection: the build id this page was served with. If the
+  // live socket ever reports a different one the server was redeployed, so we
+  // leave the game, return to the lobby, and reload fresh assets.
+  const pageBuildId = window.SERVER_BUILD_ID || "";
+  const HEARTBEAT_MS = 15000;
+  const MAX_RECONNECT = 40; // ~60s of retries to ride out a deploy
+  let updating = false;
+  let terminal = false; // server closed us deliberately (error / game over)
+  let reconnectAttempts = 0;
+  let lastPingAt = Date.now();
+  let watchdogTimer = null;
+
   const canvas = document.getElementById("board");
   const ctx = canvas.getContext("2d");
+
+  // Match the canvas backing store to the displayed size times the device
+  // pixel ratio so drawing stays crisp on Hi-DPI screens. The drawing code
+  // keeps working in the fixed 480x320 logical space via a context transform.
+  function resizeCanvasForDPR() {
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const cssW = rect.width || LOGICAL_W;
+    const cssH = rect.height || LOGICAL_H;
+    const backingW = Math.max(1, Math.round(cssW * dpr));
+    const backingH = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== backingW || canvas.height !== backingH) {
+      canvas.width = backingW;
+      canvas.height = backingH;
+    }
+    ctx.setTransform(
+      backingW / LOGICAL_W,
+      0,
+      0,
+      backingH / LOGICAL_H,
+      0,
+      0
+    );
+  }
+
+  // First pass: tint artwork to solid black without disturbing its alpha.
+  // The SVG is rasterized into a supersampled offscreen canvas so edges stay
+  // smooth when scaled onto the board, and "source-atop" recolors every
+  // covered pixel to black while leaving the original (antialiased) alpha
+  // channel untouched.
+  function makeBlackSilhouette(img) {
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    if (!w || !h) return null;
+    const dpr = window.devicePixelRatio || 1;
+    const maxDim = 1024;
+    let scale = dpr * 4;
+    if (w * scale > maxDim || h * scale > maxDim) {
+      scale = Math.min(maxDim / w, maxDim / h);
+    }
+    scale = Math.max(scale, 1);
+    const cw = Math.max(1, Math.round(w * scale));
+    const ch = Math.max(1, Math.round(h * scale));
+    const canvas = document.createElement("canvas");
+    canvas.width = cw;
+    canvas.height = ch;
+    const c = canvas.getContext("2d");
+    if (!c) return null;
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = "high";
+    c.drawImage(img, 0, 0, cw, ch);
+    c.globalCompositeOperation = "source-atop";
+    c.fillStyle = "#000";
+    c.fillRect(0, 0, cw, ch);
+    return canvas;
+  }
+
+  // Decorative jousting-lance background drawn over each player's side.
+  let lanceBgReady = false;
+  let lanceBgBlackCanvas = null;
+  const lanceBgImg = new Image();
+  lanceBgImg.onload = function () {
+    lanceBgBlackCanvas = makeBlackSilhouette(lanceBgImg);
+    lanceBgReady = true;
+    drawBoard();
+  };
+  if (window.LANCE_BG_URL) {
+    lanceBgImg.src = window.LANCE_BG_URL;
+  }
+
+  let helmetBgReady = false;
+  let helmetBgBlackCanvas = null;
+  const helmetBgImg = new Image();
+  helmetBgImg.onload = function () {
+    helmetBgBlackCanvas = makeBlackSilhouette(helmetBgImg);
+    helmetBgReady = true;
+    drawBoard();
+  };
+  if (window.HELMET_BG_URL) {
+    helmetBgImg.src = window.HELMET_BG_URL;
+  }
+
+  let checkBgReady = false;
+  let checkBgBlackCanvas = null;
+  const checkBgImg = new Image();
+  checkBgImg.onload = function () {
+    checkBgBlackCanvas = makeBlackSilhouette(checkBgImg);
+    checkBgReady = true;
+    drawBoard();
+  };
+  if (window.CHECK_BG_URL) {
+    checkBgImg.src = window.CHECK_BG_URL;
+  }
   const statusEl = document.getElementById("status");
   const turnBtn = document.getElementById("turn-btn");
+  const passBtn = document.getElementById("pass-btn");
   const resignBtn = document.getElementById("resign-btn");
-  let turnRollIndicatorEl = document.getElementById("turn-roll-indicator");
-  if (!turnRollIndicatorEl && turnBtn && turnBtn.parentElement) {
-    turnRollIndicatorEl = document.createElement("span");
-    turnRollIndicatorEl.id = "turn-roll-indicator";
-    turnRollIndicatorEl.className = "turn-roll-indicator hidden";
-    turnRollIndicatorEl.setAttribute("aria-hidden", "true");
-    turnBtn.parentElement.insertBefore(turnRollIndicatorEl, turnBtn);
-  }
+  const diceTray = document.getElementById("dice-tray");
+  const diceEls = [
+    document.getElementById("turn-roll-indicator"),
+    document.getElementById("turn-roll-indicator-2"),
+  ];
+  // Backwards-compatible alias for the first die.
+  let turnRollIndicatorEl = diceEls[0];
   const dieEl = document.getElementById("die");
   const dieCubeEl = dieEl ? dieEl.querySelector(".die__cube") : null;
+  // Second 3D die: cloned from the first so both can roll together.
+  let die2El = null;
+  let die2CubeEl = null;
+  if (dieEl && dieEl.parentElement) {
+    die2El = dieEl.cloneNode(true);
+    die2El.id = "die-2";
+    dieEl.parentElement.appendChild(die2El);
+    die2CubeEl = die2El.querySelector(".die__cube");
+  }
   const reduceMotionQuery = window.matchMedia
     ? window.matchMedia("(prefers-reduced-motion: reduce)")
     : null;
@@ -86,9 +202,10 @@
   let hopPos = null; // { role, pieceIndex, pos }
   let previewPos = null; // { role, pieceIndex, pos }
   let previewMove = null; // { mover, roll, track }
-  let selectedPiece = null;
+  let stagedPieces = []; // [piece, ...] mirrors lastState.staged for highlight
   let illegalOverlay = null; // { track }
   let lastMove = null;
+  let lastFirstMove = null; // grey arrow for opponent's first of two moves
   let dieTransitionHandler = null;
   let dieTransitionFallbackId = null;
   let depthRafId = null;
@@ -99,6 +216,9 @@
   let transientStatusUntil = 0;
   let selectableFlashTimer = null;
   let rollCycleTimer = null;
+  let rollCycleRole = null;
+  let dragState = null; // { dieIndex, fromPiece, ghost, pointerId }
+  let boardDragStarted = false; // suppress the click after a board die-face drag
 
   const FACE_ORIENTATION = {
     1: { x: 0, y: 0 },
@@ -111,8 +231,8 @@
 
   const PIP_LAYOUT = {
     1: [[1, 1]],
-    2: [[0, 0], [2, 2]],
-    3: [[0, 0], [1, 1], [2, 2]],
+    2: [[2, 0], [0, 2]],
+    3: [[2, 0], [1, 1], [0, 2]],
     4: [[0, 0], [2, 0], [0, 2], [2, 2]],
     5: [[0, 0], [2, 0], [1, 1], [0, 2], [2, 2]],
     6: [[0, 0], [2, 0], [0, 1], [2, 1], [0, 2], [2, 2]],
@@ -194,30 +314,109 @@
   }
 
   function clearSelection() {
-    selectedPiece = null;
+    stagedPieces = [];
     previewPos = null;
     previewMove = null;
     illegalOverlay = null;
   }
 
-  function currentArrowOverlay() {
-    const selectingMine =
-      !!lastState &&
-      lastState.status === "playing" &&
-      lastState.phase === "select" &&
-      lastState.turn === myRole;
-    if (
-      selectingMine &&
-      previewMove &&
-      Array.isArray(previewMove.track) &&
-      previewMove.track.length > 1
-    ) {
-      return previewMove;
+  function dieOf(piece) {
+    // Index of the staged die assigned to a piece, or -1 if unassigned.
+    if (!lastState || !Array.isArray(lastState.staged)) return -1;
+    for (let i = 0; i < lastState.staged.length; i++) {
+      if (lastState.staged[i][0] === piece) return lastState.staged[i][1];
     }
+    return -1;
+  }
+
+  function isPieceStaged(piece) {
+    return dieOf(piece) !== -1;
+  }
+
+  function stagedDieMap(state) {
+    const out = {};
+    if (state && Array.isArray(state.staged)) {
+      state.staged.forEach(function (s) { out[s[0]] = s[1]; });
+    }
+    return out;
+  }
+
+  function newlyStagedPiece(data, previousState) {
+    if (!data || data.phase !== "select") return -1;
+    if (!Array.isArray(data.staged)) return -1;
+    const before = stagedDieMap(previousState);
+    for (let i = 0; i < data.staged.length; i++) {
+      const p = data.staged[i][0];
+      const die = data.staged[i][1];
+      // Animate a piece that was just staged or had its die replaced.
+      if (before[p] === undefined || before[p] !== die) return p;
+    }
+    return -1;
+  }
+
+  function pieceDiceOptions(piece) {
+    const previews = lastState && Array.isArray(lastState.previews)
+      ? lastState.previews
+      : [];
+    const entry = previews[piece];
+    return entry && Array.isArray(entry.dice) ? entry.dice : [];
+  }
+
+  function dieValue(dieIndex) {
+    const dice = lastState && Array.isArray(lastState.dice) ? lastState.dice : null;
+    return dice && dieIndex >= 0 && dieIndex < dice.length ? dice[dieIndex] : null;
+  }
+
+  function stagedTrackFor(piece, role) {
+    const mover = role || myRole;
+    const die = dieOf(piece);
+    if (die === -1) return null;
+    const opt = pieceDiceOptions(piece)[die];
+    if (!opt || !Array.isArray(opt.path)) return null;
+    const origin = pieceCell(lastState, mover, piece);
+    if (!isCell(origin)) return null;
+    return {
+      mover: mover,
+      piece: piece,
+      roll: dieValue(die),
+      track: [origin].concat(opt.path.filter(isCell)),
+    };
+  }
+
+  function currentArrowOverlay() {
+    // Show the most recent committed move when not actively assigning dice.
     if (lastMove && Array.isArray(lastMove.track) && lastMove.track.length > 1) {
       return lastMove;
     }
     return null;
+  }
+
+  function selectingRole() {
+    // The role currently assigning dice, whether it's us or the opponent.
+    // Independent of inputLocked so staged arrows show during the hop
+    // animation of our own newly assigned piece, just like the opponent's.
+    if (
+      !lastState ||
+      lastState.status !== "playing" ||
+      lastState.phase !== "select"
+    ) {
+      return null;
+    }
+    return lastState.turn === "host" || lastState.turn === "guest"
+      ? lastState.turn
+      : null;
+  }
+
+  function stagedArrowOverlays() {
+    const role = selectingRole();
+    if (!role) return [];
+    if (!lastState || !Array.isArray(lastState.staged)) return [];
+    const overlays = [];
+    for (let i = 0; i < lastState.staged.length; i++) {
+      const track = stagedTrackFor(lastState.staged[i][0], role);
+      if (track) overlays.push(track);
+    }
+    return overlays;
   }
 
   function canSelectPieces() {
@@ -231,11 +430,11 @@
   }
 
   function waitingToConfirmSelection() {
-    return canSelectPieces() && Number.isInteger(selectedPiece);
+    return canSelectPieces() && lastState && lastState.can_confirm;
   }
 
   function waitingToSelectPiece() {
-    return canSelectPieces() && !Number.isInteger(selectedPiece);
+    return canSelectPieces() && lastState && !lastState.can_confirm;
   }
 
   function waitingForOpponentToSelectPiece() {
@@ -243,6 +442,16 @@
       !!lastState &&
       lastState.status === "playing" &&
       lastState.phase === "select" &&
+      (myRole === "host" || myRole === "guest") &&
+      lastState.turn !== myRole
+    );
+  }
+
+  function waitingForOpponentToRollDice() {
+    return (
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "roll" &&
       (myRole === "host" || myRole === "guest") &&
       lastState.turn !== myRole
     );
@@ -295,35 +504,58 @@
     turnBtn.replaceChildren(document.createTextNode(label));
   }
 
-  function hideTurnRollIndicator() {
-    if (!turnRollIndicatorEl) return;
-    turnRollIndicatorEl.classList.add("hidden");
-    turnRollIndicatorEl.classList.remove("die--red", "die--blue");
-    turnRollIndicatorEl.setAttribute("aria-hidden", "true");
-    turnRollIndicatorEl.replaceChildren();
-  }
-
-  function setTurnRollIndicator(roll, role) {
-    if (!turnRollIndicatorEl) return;
-
+  function renderDie(el, roll, role) {
+    if (!el) return;
     const classes = DIE_DOT_CLASSES[roll];
     if (!classes) {
-      hideTurnRollIndicator();
+      el.classList.add("hidden");
+      el.classList.remove("die--red", "die--blue", "die--staged", "die--draggable");
+      el.setAttribute("aria-hidden", "true");
+      el.replaceChildren();
       return;
     }
-
-    turnRollIndicatorEl.classList.remove("hidden", "die--red", "die--blue");
-    turnRollIndicatorEl.classList.add(
-      role === "host" ? "die--red" : "die--blue"
-    );
-    turnRollIndicatorEl.setAttribute("aria-hidden", "false");
-    turnRollIndicatorEl.replaceChildren();
-
+    el.classList.remove("hidden", "die--red", "die--blue");
+    el.classList.add(role === "host" ? "die--red" : "die--blue");
+    el.setAttribute("aria-hidden", "false");
+    el.replaceChildren();
     classes.forEach(function (dotClasses) {
       const dot = document.createElement("span");
       dot.className = "dot " + dotClasses;
-      turnRollIndicatorEl.appendChild(dot);
+      el.appendChild(dot);
     });
+  }
+
+  function hideDieFace(idx) {
+    renderDie(diceEls[idx], null, null);
+  }
+
+  function hideTurnRollIndicator() {
+    hideDieFace(0);
+    hideDieFace(1);
+  }
+
+  // Render both dice from the current state, marking assigned/draggable dice.
+  function renderDice() {
+    const dice = lastState && Array.isArray(lastState.dice) ? lastState.dice : null;
+    if (!dice || lastState.phase !== "select") {
+      hideTurnRollIndicator();
+      return;
+    }
+    const staged = Array.isArray(lastState.staged) ? lastState.staged : [];
+    const stagedDice = staged.map(function (s) { return s[1]; });
+    for (let i = 0; i < diceEls.length; i++) {
+      const el = diceEls[i];
+      renderDie(el, dice[i], lastState.turn);
+      const assigned = stagedDice.indexOf(i) !== -1;
+      el.classList.toggle("die--staged", assigned);
+      const mine = lastState.turn === myRole && !inputLocked;
+      el.classList.toggle("die--draggable", mine);
+      el.dataset.dieIndex = String(i);
+    }
+  }
+
+  function setTurnRollIndicator() {
+    renderDice();
   }
 
   function stopRollCycle() {
@@ -331,25 +563,27 @@
       clearInterval(rollCycleTimer);
       rollCycleTimer = null;
     }
+    rollCycleRole = null;
   }
 
   function startRollCycle(role) {
-    if (!turnRollIndicatorEl) return;
-    const showRandomFace = function () {
-      setTurnRollIndicator(Math.floor(Math.random() * 6) + 1, role);
+    rollCycleRole = role;
+    const showRandomFaces = function () {
+      renderDie(diceEls[0], Math.floor(Math.random() * 6) + 1, role);
+      renderDie(diceEls[1], Math.floor(Math.random() * 6) + 1, role);
     };
-    showRandomFace();
+    showRandomFaces();
     if (rollCycleTimer !== null) {
       clearInterval(rollCycleTimer);
     }
-    rollCycleTimer = setInterval(showRandomFace, 150);
+    rollCycleTimer = setInterval(showRandomFaces, 150);
   }
 
   function arrowTrackPoints(track) {
     return track.filter(isCell).map(cellCenter);
   }
 
-  function drawMoveArrowShaft(track, mover) {
+  function drawMoveArrowShaft(track, mover, opts) {
     const points = arrowTrackPoints(track);
     if (points.length < 2) return;
 
@@ -364,14 +598,21 @@
 
     if (pathPoints.length < 2) return;
 
-    const moverStroke = moverColor(mover);
-    const strokeLayers = [
-      { width: 20, color: "#0b1220" },
-      { width: 16, color: "#ffffff" },
-      { width: 12, color: moverStroke },
-    ];
+    const grey = !!(opts && opts.grey);
+    const moverStroke = grey ? "#9ca3af" : moverColor(mover);
+    const strokeLayers = grey
+      ? [
+          { width: 16, color: "#6b7280" },
+          { width: 12, color: "#9ca3af" },
+        ]
+      : [
+          { width: 20, color: "#0b1220" },
+          { width: 16, color: "#ffffff" },
+          { width: 12, color: moverStroke },
+        ];
 
     ctx.save();
+    if (grey) ctx.globalAlpha = 0.4;
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
 
@@ -389,9 +630,10 @@
     ctx.restore();
   }
 
-  function drawMoveArrowHead(track, mover) {
+  function drawMoveArrowHead(track, mover, opts) {
     const points = track.filter(isCell).map(cellCenter);
     if (points.length < 2) return;
+    const grey = !!(opts && opts.grey);
 
     const tip = points[points.length - 1];
     let prev = points[points.length - 2];
@@ -406,7 +648,7 @@
     const headLength = 48;
     const headWidth = 36;
     const halfW = headWidth / 2;
-    const moverStroke = moverColor(mover);
+    const moverStroke = grey ? "#9ca3af" : moverColor(mover);
     const baseX = tip.x - Math.cos(angle) * headLength;
     const baseY = tip.y - Math.sin(angle) * headLength;
     const leftX = baseX + Math.cos(angle + Math.PI / 2) * halfW;
@@ -419,6 +661,7 @@
     const rightBaseThirdY = rightY + (leftY - rightY) / 12;
 
     ctx.save();
+    if (grey) ctx.globalAlpha = 0.4;
     ctx.beginPath();
     ctx.moveTo(tip.x, tip.y);
     ctx.lineTo(leftX, leftY);
@@ -427,10 +670,13 @@
     ctx.fillStyle = moverStroke;
     ctx.fill();
 
-    [
-      { width: 9, color: "#0b1220" },
-      { width: 4.5, color: "#ffffff" },
-    ].forEach(function (layer) {
+    (grey
+      ? [{ width: 6, color: "#6b7280" }]
+      : [
+          { width: 9, color: "#0b1220" },
+          { width: 4.5, color: "#ffffff" },
+        ]
+    ).forEach(function (layer) {
       ctx.beginPath();
       ctx.moveTo(leftX, leftY);
       ctx.lineTo(tip.x, tip.y);
@@ -456,9 +702,10 @@
     ctx.restore();
   }
 
-  function drawTrackDie(origin, value, mover) {
+  function drawTrackDie(origin, value, mover, opts) {
     if (!isCell(origin) || typeof value !== "number" || !PIP_LAYOUT[value]) return;
 
+    const grey = !!(opts && opts.grey);
     const center = cellCenter(origin);
     const size = CELL * 0.52;
     const x = center.x - size / 2;
@@ -466,11 +713,12 @@
     const radius = size * 0.18;
 
     ctx.save();
+    if (grey) ctx.globalAlpha = 0.4;
     roundedRectPath(x, y, size, size, radius);
-    ctx.fillStyle = moverColor(mover);
+    ctx.fillStyle = grey ? "#9ca3af" : moverColor(mover);
     ctx.fill();
     ctx.lineWidth = 3;
-    ctx.strokeStyle = "#0b1220";
+    ctx.strokeStyle = grey ? "#6b7280" : "#0b1220";
     ctx.stroke();
 
     const anchors = [0.28, 0.5, 0.72];
@@ -539,11 +787,10 @@
     const movedLast = !!(opts && opts.movedLast);
     const flashOutline = !!(opts && opts.flashOutline);
     const moving = !!(opts && opts.moving);
-    const selectedStroke = moving ? COLORS.youRing : COLORS.selectedRing;
     const stroke = flashOutline
       ? flashingSelectableStroke()
       : selected
-        ? selectedStroke
+        ? COLORS.youRing
       : movedLast
         ? COLORS.youRing
         : COLORS.diskOutline;
@@ -555,20 +802,11 @@
     ctx.lineWidth = 4;
     ctx.strokeStyle = stroke;
     ctx.stroke();
-
-    if (selected && !flashOutline && !moving) {
-      ctx.beginPath();
-      ctx.arc(cx, cy, CELL * 0.12, 0, Math.PI * 2);
-      ctx.fillStyle = COLORS.selectedRing;
-      ctx.fill();
-    }
   }
 
   function isPieceSelected(role, piece) {
-    return (
-      role === myRole &&
-      selectedPiece === piece
-    );
+    // Staged entries always belong to the role currently assigning dice.
+    return role === selectingRole() && isPieceStaged(piece);
   }
 
   function drawRoleDisks(role, selectedOnly) {
@@ -596,21 +834,27 @@
         isCell(previewPos.pos)
       ) {
         drawPos = previewPos.pos;
+      } else if (role === selectingRole() && isPieceStaged(piece)) {
+        // A staged piece sits at the destination of its assigned die.
+        const ov = stagedTrackFor(piece, role);
+        if (ov && ov.track.length) drawPos = ov.track[ov.track.length - 1];
       }
 
       const movedLast =
         !!lastState &&
         lastState.last_mover === role &&
-        lastState.moved_piece === piece;
+        (lastState.moved_piece === piece ||
+          (Number.isInteger(lastState.first_moved_piece) &&
+            lastState.first_moved_piece === piece)) &&
+        !waitingForOpponentToSelectPiece();
       const opponentSelecting =
         waitingForOpponentToSelectPiece() &&
         role !== myRole;
       const flashOutline =
-        opponentSelecting ||
+        (opponentSelecting && !selected) ||
         (role === myRole &&
           canSelectPieces() &&
-          (waitingToSelectPiece() ||
-            (waitingToConfirmSelection() && selectedPiece === piece)));
+          !isPieceStaged(piece));
       const moving =
         !!hopPos &&
         hopPos.role === role &&
@@ -624,8 +868,110 @@
     }
   }
 
+  // Draws transparent jousting-lance images, rotated, over each player's half:
+  // one centered on the bottom row's left 4 cells (cols 0-3) and one on the top
+  // row's right 4 cells (cols 2-5). Top half: rows 0/1, bottom half: rows 2/3.
+  function drawLanceBackground() {
+    if (!lanceBgReady || !lanceBgImg.naturalWidth) return;
+
+    const source = lanceBgBlackCanvas || lanceBgImg;
+    const sourceW = lanceBgBlackCanvas
+      ? lanceBgBlackCanvas.width
+      : lanceBgImg.naturalWidth;
+    const sourceH = lanceBgBlackCanvas
+      ? lanceBgBlackCanvas.height
+      : lanceBgImg.naturalHeight;
+    const aspect = sourceW / sourceH;
+    const spanCells = 4;
+    const drawW = spanCells * CELL * 0.7; // span the 4-cell width
+    const drawH = drawW / aspect;
+    const leftCx = (spanCells / 2) * CELL; // centered over cols 0-3
+    const rightCx = (COLS - spanCells / 2) * CELL; // centered over cols 2-5
+    const angle = (172 * Math.PI) / 180;
+
+    const placements = [
+      { cx: leftCx, cy: 1.5 * CELL, extraRotation: 0 }, // top half, bottom row (row 1)
+      { cx: leftCx, cy: (ROWS - 0.5) * CELL, extraRotation: 0 }, // bottom half, bottom row (row 3)
+      { cx: rightCx, cy: 0.5 * CELL, extraRotation: Math.PI }, // top half, top row (row 0)
+      { cx: rightCx, cy: (ROWS - 1.5) * CELL, extraRotation: Math.PI }, // bottom half, top row (row 2)
+    ];
+
+    placements.forEach(function (p) {
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.translate(p.cx, p.cy);
+      ctx.rotate(angle + p.extraRotation);
+      ctx.drawImage(source, -drawW / 2, -drawH / 2, drawW, drawH);
+      ctx.restore();
+    });
+  }
+
+  function drawHelmetBackground() {
+    if (!helmetBgReady || !helmetBgImg.naturalWidth) return;
+
+    const source = helmetBgBlackCanvas || helmetBgImg;
+
+    const drawSize = CELL * 0.60;
+    const boardCenterY = (ROWS * CELL) / 2;
+    const centerShift = CELL * 0.62;
+    const placements = [
+      { cx: 0.5 * CELL, cy: (ROWS - 0.5) * CELL, rotation: 0 },
+      { cx: (COLS - 0.5) * CELL, cy: 0.5 * CELL, rotation: Math.PI },
+    ];
+
+    placements.forEach(function (p) {
+      const shiftedCy =
+        p.cy < boardCenterY ? p.cy + centerShift : p.cy - centerShift;
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.translate(p.cx, shiftedCy);
+      ctx.rotate(p.rotation);
+      ctx.drawImage(
+        source,
+        -drawSize / 2,
+        -drawSize / 2,
+        drawSize,
+        drawSize
+      );
+      ctx.restore();
+    });
+  }
+
+  function drawCheckBackground() {
+    if (!checkBgReady || !checkBgImg.naturalWidth) return;
+
+    const source = checkBgBlackCanvas || checkBgImg;
+
+    const drawSize = CELL * 0.25;
+    const edgeInset = drawSize * 0.25;
+    const offsets = [0.08, 0.19, 0.81, 0.92];
+
+    offsets.forEach(function (t) {
+      const playerX = t * CELL;
+      const playerY = 3 * CELL - edgeInset;
+
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.translate(playerX, playerY);
+      ctx.drawImage(source, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+
+      const mirroredT = 1 - t;
+      const oppX = (COLS - 1) * CELL + mirroredT * CELL;
+      const oppY = 1 * CELL + edgeInset;
+
+      ctx.save();
+      ctx.globalAlpha = 0.25;
+      ctx.translate(oppX, oppY);
+      ctx.rotate(Math.PI);
+      ctx.drawImage(source, -drawSize / 2, -drawSize / 2, drawSize, drawSize);
+      ctx.restore();
+    });
+  }
+
   function drawBoard() {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    resizeCanvasForDPR();
+    ctx.clearRect(0, 0, LOGICAL_W, LOGICAL_H);
 
     const bottomColor = myRole === "guest" ? COLORS.blue : COLORS.red;
     const topColor = myRole === "guest" ? COLORS.red : COLORS.blue;
@@ -652,22 +998,59 @@
       ctx.stroke();
     }
 
+    // Black divider line, 4 cells wide and centered horizontally, drawn
+    // between each player's two rows (top player: rows 0/1, bottom: rows 2/3).
+    const lineWidthCells = 4;
+    const lineStartX = ((COLS - lineWidthCells) / 2) * CELL;
+    const lineEndX = lineStartX + lineWidthCells * CELL;
+    ctx.strokeStyle = "rgba(0, 0, 0, 0.65)";
+    ctx.lineWidth = 4;
+    [1, 3].forEach(function (rowBoundary) {
+      ctx.beginPath();
+      ctx.moveTo(lineStartX, rowBoundary * CELL);
+      ctx.lineTo(lineEndX, rowBoundary * CELL);
+      ctx.stroke();
+    });
+
+    drawLanceBackground();
+    drawHelmetBackground();
+    drawCheckBackground();
+
     const arrowOverlay = currentArrowOverlay();
-    const movingSelectedPiece =
-      Number.isInteger(selectedPiece) &&
-      !!hopPos &&
-      hopPos.role === myRole &&
-      hopPos.pieceIndex === selectedPiece;
+    const staged = stagedArrowOverlays();
+    const greyFirst = staged.length >= 2;
+    // The opponent's committed first move (of two) is shown greyed beneath
+    // the pieces, just like our own staged first move.
+    const greyCommitted =
+      staged.length === 0 &&
+      lastFirstMove &&
+      Array.isArray(lastFirstMove.track) &&
+      lastFirstMove.track.length > 1
+        ? lastFirstMove
+        : null;
+
+    // Once a second move is staged, the first move's arrow fades to a
+    // transparent grey and is drawn beneath the pieces so the second
+    // moved piece layers on top of it.
+    if (greyFirst) {
+      const first = staged[0];
+      drawMoveArrowShaft(first.track, first.mover, { grey: true });
+      drawMoveArrowHead(first.track, first.mover, { grey: true });
+      drawTrackDie(first.track[0], first.roll, first.mover, { grey: true });
+    } else if (greyCommitted) {
+      drawMoveArrowShaft(greyCommitted.track, greyCommitted.mover, { grey: true });
+      drawMoveArrowHead(greyCommitted.track, greyCommitted.mover, { grey: true });
+      drawTrackDie(
+        greyCommitted.track[0],
+        greyCommitted.roll,
+        greyCommitted.mover,
+        { grey: true }
+      );
+    }
 
     if (lastState && lastState.disks) {
       drawRoleDisks("host", false);
       drawRoleDisks("guest", false);
-    }
-
-    if (movingSelectedPiece && arrowOverlay) {
-      drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover);
-      drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover);
-      drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover);
     }
 
     if (lastState && lastState.disks) {
@@ -675,7 +1058,16 @@
       drawRoleDisks("guest", true);
     }
 
-    if (!movingSelectedPiece && arrowOverlay) {
+    // Staged move arrows drawn on top of the pieces. When a second move is
+    // staged, the first arrow was already drawn (greyed) beneath the pieces,
+    // so only the second arrow is drawn here at full opacity.
+    (greyFirst ? staged.slice(1) : staged).forEach(function (ov) {
+      drawMoveArrowShaft(ov.track, ov.mover);
+      drawMoveArrowHead(ov.track, ov.mover);
+      drawTrackDie(ov.track[0], ov.roll, ov.mover);
+    });
+
+    if (staged.length === 0 && arrowOverlay) {
       drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover);
       drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover);
       drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover);
@@ -688,21 +1080,42 @@
 
   function getMoveOverlay(data, previousState) {
     const hasPath = Array.isArray(data.path) && data.path.length > 0;
-    const hasRoll = typeof data.roll === "number" && data.roll >= 1 && data.roll <= 6;
     const hasMover = data.last_mover === "host" || data.last_mover === "guest";
     const hasPiece = Number.isInteger(data.moved_piece);
-    if (!hasPath || !hasRoll || !hasMover || !hasPiece) return null;
+    if (!hasPath || !hasMover || !hasPiece) return null;
 
     const origin = isCell(data.move_from)
       ? data.move_from
       : pieceCell(previousState, data.last_mover, data.moved_piece);
     if (!origin) return null;
 
+    const cells = data.path.filter(isCell);
     return {
       mover: data.last_mover,
       piece: data.moved_piece,
-      roll: data.roll,
-      track: [origin].concat(data.path.filter(isCell)),
+      roll: cells.length,
+      track: [origin].concat(cells),
+    };
+  }
+
+  function getFirstMoveOverlay(data, previousState) {
+    // The opponent's first of two committed moves, shown as a grey arrow.
+    const hasPath = Array.isArray(data.first_path) && data.first_path.length > 0;
+    const hasMover = data.last_mover === "host" || data.last_mover === "guest";
+    const hasPiece = Number.isInteger(data.first_moved_piece);
+    if (!hasPath || !hasMover || !hasPiece) return null;
+
+    const origin = isCell(data.first_move_from)
+      ? data.first_move_from
+      : pieceCell(previousState, data.last_mover, data.first_moved_piece);
+    if (!origin) return null;
+
+    const cells = data.first_path.filter(isCell);
+    return {
+      mover: data.last_mover,
+      piece: data.first_moved_piece,
+      roll: cells.length,
+      track: [origin].concat(cells),
     };
   }
 
@@ -723,17 +1136,31 @@
     }
     if (lastState.phase === "select") {
       if (lastState.turn === myRole) {
-        return Number.isInteger(selectedPiece)
-          ? "Piece selected. Confirm to move."
-          : "Select a piece to move.";
+        if (lastState.no_legal_move) return "No legal move. Press Pass.";
+        return lastState.can_confirm
+          ? "Confirm when finished assigning dice."
+          : "Drag a die onto a piece to move.";
       }
-      return "Opponent is choosing a piece...";
+      return "Opponent is choosing moves...";
+    }
+    if (lastState.phase === "roll") {
+      return lastState.turn === myRole
+        ? "Your turn to roll the dice"
+        : "Opponent's turn to roll the dice";
     }
     return lastState.turn === myRole ? "Your turn" : "Opponent's turn";
   }
 
   function updateStatus() {
     statusEl.textContent = currentStatusText();
+
+    const turnRole =
+      lastState && lastState.status === "playing" ? lastState.turn : null;
+    if (turnRole === "host" || turnRole === "guest") {
+      statusEl.style.color = moverColor(turnRole);
+    } else {
+      statusEl.style.color = "";
+    }
 
     const canPlay =
       !!lastState &&
@@ -744,30 +1171,36 @@
       lastState.status === "playing" &&
       lastState.phase === "select";
     const selecting = canPlay && inSelectPhase;
-    const selectingMineNoPick = waitingToSelectPiece();
-    const selectingOpponent = waitingForOpponentToSelectPiece();
     const showRollIndicator =
-      inSelectPhase &&
-      typeof lastState.roll === "number" &&
-      lastState.roll >= 1 &&
-      lastState.roll <= 6 &&
-      !!lastState.turn;
+      inSelectPhase && Array.isArray(lastState.dice) && !!lastState.turn;
+
 
     const cycleRollIndicator =
       !!lastState &&
       lastState.status === "playing" &&
       lastState.phase === "roll" &&
-      !!lastState.turn &&
-      !isDieRolling();
+      (lastState.turn === "host" || lastState.turn === "guest");
 
     if (cycleRollIndicator) {
-      if (rollCycleTimer === null) {
+      const opponentRolling = lastState.turn !== myRole;
+      diceEls.forEach(function (el) {
+        if (!el) return;
+        el.classList.toggle("die--roll-dim", opponentRolling);
+        el.classList.toggle("die--roll-active", !opponentRolling);
+      });
+      if (rollCycleTimer === null || rollCycleRole !== lastState.turn) {
         startRollCycle(lastState.turn);
       }
     } else if (showRollIndicator) {
+      diceEls.forEach(function (el) {
+        if (el) el.classList.remove("die--roll-dim", "die--roll-active");
+      });
       stopRollCycle();
-      setTurnRollIndicator(lastState.roll, lastState.turn);
+      renderDice();
     } else {
+      diceEls.forEach(function (el) {
+        if (el) el.classList.remove("die--roll-dim", "die--roll-active");
+      });
       stopRollCycle();
       hideTurnRollIndicator();
     }
@@ -775,20 +1208,26 @@
     if (!canPlay) {
       turnBtn.disabled = true;
     } else if (selecting) {
-      turnBtn.disabled = inputLocked || !Number.isInteger(selectedPiece);
+      turnBtn.disabled = inputLocked || !lastState.can_confirm;
     } else {
       turnBtn.disabled = inputLocked;
     }
 
-    if (selectingOpponent) {
-      setTurnButtonText("Wait");
-    } else if (selectingMineNoPick) {
-      setTurnButtonText("Pick");
-    } else if (selecting) {
+    if (selecting) {
       setTurnButtonText("Confirm");
+    } else if (
+      waitingForOpponentToSelectPiece() ||
+      waitingForOpponentToRollDice()
+    ) {
+      setTurnButtonText("Their Turn");
     } else {
-      setTurnButtonText(turnBtn.disabled ? "Rolling" : "Roll Die");
+      setTurnButtonText(turnBtn.disabled && canPlay ? "Rolling" : "Roll Dice");
     }
+
+    // Pass button: always visible, only enabled for active player during
+    // selection when passing is allowed.
+    const canPass = selecting && !!lastState.can_pass;
+    passBtn.disabled = !canPass || inputLocked;
 
     resignBtn.disabled = !lastState || lastState.status !== "playing" || inputLocked;
     canvas.classList.toggle("board--selectable", canSelectPieces());
@@ -1066,9 +1505,9 @@
     const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
 
-    const x = (event.clientX - rect.left) * (canvas.width / rect.width);
-    const y = (event.clientY - rect.top) * (canvas.height / rect.height);
-    if (x < 0 || y < 0 || x >= canvas.width || y >= canvas.height) {
+    const x = (event.clientX - rect.left) * (LOGICAL_W / rect.width);
+    const y = (event.clientY - rect.top) * (LOGICAL_H / rect.height);
+    if (x < 0 || y < 0 || x >= LOGICAL_W || y >= LOGICAL_H) {
       return null;
     }
 
@@ -1081,8 +1520,8 @@
     const rect = canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
     return {
-      x: (event.clientX - rect.left) * (canvas.width / rect.width),
-      y: (event.clientY - rect.top) * (canvas.height / rect.height),
+      x: (event.clientX - rect.left) * (LOGICAL_W / rect.width),
+      y: (event.clientY - rect.top) * (LOGICAL_H / rect.height),
     };
   }
 
@@ -1103,12 +1542,103 @@
     );
   }
 
-  function shouldAnimateRoll(data) {
+  function shouldAnimateRoll(data, previousState) {
     if (data.status !== "playing") return false;
-    if (typeof data.roll !== "number" || data.roll < 1 || data.roll > 6) {
-      return false;
+    if (data.phase !== "select") return false;
+    if (!Array.isArray(data.dice) || data.dice.length < 2) return false;
+    if (Array.isArray(data.staged) && data.staged.length > 0) return false;
+    // Only animate the transition from a roll into selection.
+    return !previousState || previousState.phase !== "select";
+  }
+
+  function setDieColor(role) {
+    [dieEl, die2El].forEach(function (el) {
+      if (!el) return;
+      el.classList.remove("die--red", "die--blue");
+      if (role === "host") el.classList.add("die--red");
+      else if (role === "guest") el.classList.add("die--blue");
+    });
+  }
+
+  function showCube(el, cube) {
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.setAttribute("aria-hidden", "false");
+    if (cube) {
+      cube.style.transition = "none";
+      cube.style.transform = "rotateX(0deg) rotateY(0deg)";
     }
-    return data.phase === "select" || !!data.no_legal_move;
+  }
+
+  function hideCube(el, cube) {
+    if (!el) return;
+    el.classList.add("hidden");
+    el.classList.remove("die--rolling-geometry");
+    el.setAttribute("aria-hidden", "true");
+    if (cube) {
+      cube.style.transition = "none";
+      cube.style.transform = "rotateX(0deg) rotateY(0deg)";
+    }
+  }
+
+  // Roll both 3D cubes to their target faces, calling onDone once both settle.
+  function animate3dDice(dice, role, onDone) {
+    setDieColor(role);
+    const cubes = [
+      { el: dieEl, cube: dieCubeEl, face: dice[0] },
+      { el: die2El, cube: die2CubeEl, face: dice[1] },
+    ];
+    let remaining = cubes.length;
+    const finish = function () {
+      remaining -= 1;
+      if (remaining <= 0 && onDone) onDone();
+    };
+    const reduce = reduceMotionQuery ? reduceMotionQuery.matches : false;
+    cubes.forEach(function (d) {
+      if (!d.el || !d.cube) { finish(); return; }
+      const orient = FACE_ORIENTATION[d.face] || FACE_ORIENTATION[1];
+      showCube(d.el, d.cube);
+      d.el.classList.add("die--rolling-geometry");
+      if (reduce) {
+        d.cube.style.transition = "none";
+        d.cube.style.transform =
+          "rotateX(" + orient.x + "deg) rotateY(" + orient.y + "deg)";
+        setTimeout(finish, 200);
+        return;
+      }
+      const tx = orient.x + (2 + Math.floor(Math.random() * 2)) * 360;
+      const ty = orient.y + (2 + Math.floor(Math.random() * 2)) * 360;
+      void d.cube.offsetWidth;
+      let done = false;
+      const onEnd = function (e) {
+        if (e && e.propertyName !== "transform") return;
+        if (done) return;
+        done = true;
+        d.cube.removeEventListener("transitionend", onEnd);
+        d.el.classList.remove("die--rolling-geometry");
+        finish();
+      };
+      d.cube.addEventListener("transitionend", onEnd);
+      setTimeout(onEnd, 1300);
+      d.cube.style.transition = "transform 1.1s cubic-bezier(0.2,0.7,0.2,1)";
+      d.cube.style.transform = "rotateX(" + tx + "deg) rotateY(" + ty + "deg)";
+    });
+  }
+
+  function hide3dDice() {
+    hideCube(dieEl, dieCubeEl);
+    hideCube(die2El, die2CubeEl);
+  }
+
+  function animateDiceRoll(dice, role, onDone) {
+    stopRollCycle();
+    hideTurnRollIndicator();
+    animate3dDice(dice, role, function () {
+      hide3dDice();
+      renderDie(diceEls[0], dice[0], role);
+      renderDie(diceEls[1], dice[1], role);
+      if (onDone) onDone();
+    });
   }
 
   function shouldAnimateOpponentMove(data, previousState) {
@@ -1117,6 +1647,17 @@
     if (data.last_mover === myRole) return false;
     if (!Number.isInteger(data.moved_piece)) return false;
     if (!Array.isArray(data.path) || data.path.length === 0) return false;
+
+    // If we already saw the opponent stage moves in select phase, do not
+    // replay the committed move animation on confirm.
+    if (
+      previousState &&
+      previousState.status === "playing" &&
+      previousState.phase === "select" &&
+      previousState.turn === data.last_mover
+    ) {
+      return false;
+    }
 
     const before = pieceCell(previousState, data.last_mover, data.moved_piece);
     const after = pieceCell(data, data.last_mover, data.moved_piece);
@@ -1146,24 +1687,41 @@
       lastMove = null;
     }
 
-    if (shouldAnimateRoll(data)) {
-      inputLocked = true;
-      lastState = previousState || data;
-      statusEl.textContent = "Rolling die...";
-      turnBtn.disabled = true;
-      resignBtn.disabled = true;
-      setDieColor(data.turn);
+    const firstMoveOverlay = getFirstMoveOverlay(data, previousState);
+    if (firstMoveOverlay) {
+      lastFirstMove = firstMoveOverlay;
+    } else {
+      lastFirstMove = null;
+    }
 
-      animateRoll(data.roll, function () {
+    // Once a player rolls (enters the select phase), stop showing the
+    // arrow for the other player's previous move.
+    const enteredSelect =
+      data.status === "playing" &&
+      data.phase === "select" &&
+      (!previousState || previousState.phase !== "select");
+    if (enteredSelect) {
+      lastMove = null;
+      lastFirstMove = null;
+    }
+
+    if (shouldAnimateRoll(data, previousState)) {
+      inputLocked = true;
+      lastState = data;
+      statusEl.textContent = "Rolling dice...";
+      turnBtn.disabled = true;
+      passBtn.disabled = true;
+      resignBtn.disabled = true;
+
+      animateDiceRoll(data.dice, data.turn, function () {
         if (applyToken !== stateApplyToken) {
           return;
         }
         inputLocked = false;
         hopPos = null;
         lastState = data;
-        hideDie();
         if (data.no_legal_move) {
-          setTransientStatus("No legal move. Turn passed.", 1600);
+          setTransientStatus("No legal move. Press Pass.", 1600);
         }
         drawBoard();
         updateStatus();
@@ -1187,7 +1745,7 @@
           }
           inputLocked = false;
           hopPos = null;
-          hideDie();
+          hide3dDice();
           lastState = data;
           drawBoard();
           updateStatus();
@@ -1199,122 +1757,104 @@
       return;
     }
 
+    // A die just got dropped on a piece (ours or the opponent's): hop it to
+    // the pending destination using the same animation as a committed move.
+    const newPiece = newlyStagedPiece(data, previousState);
+    if (newPiece >= 0) {
+      lastState = data;
+      const opt = pieceDiceOptions(newPiece)[dieOf(newPiece)];
+      const stagePath = opt && Array.isArray(opt.path) ? opt.path : [];
+      if (stagePath.length) {
+        inputLocked = true;
+        hopPiece(data.turn, newPiece, stagePath, function () {
+          if (applyToken !== stateApplyToken) return;
+          inputLocked = false;
+          hopPos = null;
+          drawBoard();
+          updateStatus();
+        }, applyToken, 160, 110);
+        drawBoard();
+        updateStatus();
+        return;
+      }
+    }
+
     inputLocked = false;
     hopPos = null;
-    hideDie();
+    hide3dDice();
     if (data.no_legal_move) {
-      setTransientStatus("No legal move. Turn passed.", 1600);
+      // A pass that committed one move means the other die was unplayable;
+      // otherwise no die could be played at all.
+      setTransientStatus(
+        Number.isInteger(data.moved_piece)
+          ? "One unplayable die. Turn passed."
+          : "No legal move. Turn passed.",
+        1600
+      );
     }
     lastState = data;
     drawBoard();
     updateStatus();
   }
 
-  function handleBoardClick(event) {
-    if (!canSelectPieces()) {
-      return;
-    }
-
-    // Clicking the track die at the base of the arrow cancels the current
-    // selection and returns to the "select a piece" phase.
-    if (Number.isInteger(selectedPiece) && eventHitsTrackDie(event)) {
-      clearSelection();
-      drawBoard();
-      updateStatus();
-      return;
-    }
-
+  function pieceAtEvent(event) {
     const cell = eventToCanonicalCell(event);
-    if (!isCell(cell)) {
-      return;
-    }
-
+    if (!isCell(cell)) return -1;
     const myDisks = roleDisks(lastState, myRole);
-    let piece = -1;
     for (let i = 0; i < myDisks.length; i++) {
-      if (sameCell(myDisks[i], cell)) {
-        piece = i;
-        break;
-      }
+      if (sameCell(myDisks[i], cell)) return i;
     }
-    if (piece < 0) {
-      return;
-    }
+    return -1;
+  }
 
-    const previews = Array.isArray(lastState.previews) ? lastState.previews : [];
-    const preview = previews[piece];
-    if (!preview || !Array.isArray(preview.path) || preview.path.length === 0) {
-      return;
-    }
-
+  // Bounce a piece forward and back to signal an illegal drop / collision.
+  function previewCollide(piece, dieIndex) {
+    const opt = pieceDiceOptions(piece)[dieIndex];
+    const path = opt && Array.isArray(opt.path) ? opt.path : [];
+    if (path.length === 0) return;
     const applyToken = stateApplyToken;
-    if (preview.legal) {
-      selectedPiece = piece;
-      previewPos = null;
-      previewMove = {
-        mover: myRole,
-        roll: lastState.roll,
-        track: [myDisks[piece]].concat(preview.path.filter(isCell)),
-      };
-      illegalOverlay = null;
-      hopPos = null;
-      inputLocked = true;
-      drawBoard();
-      updateStatus();
-
-      hopPiece(
-        myRole,
-        piece,
-        preview.path,
-        function () {
-          if (applyToken !== stateApplyToken) {
-            return;
-          }
-          inputLocked = false;
-          hopPos = null;
-          previewPos = {
-            role: myRole,
-            pieceIndex: piece,
-            pos: preview.path[preview.path.length - 1],
-          };
-          drawBoard();
-          updateStatus();
-        },
-        applyToken,
-        160,
-        110
-      );
-      return;
-    }
-
-    // User-requested behavior: illegal click clears any prior valid selection.
-    clearSelection();
     inputLocked = true;
     drawBoard();
     updateStatus();
+    previewRebound(myRole, piece, path, function () {
+      if (applyToken !== stateApplyToken) return;
+      inputLocked = false;
+      drawBoard();
+      updateStatus();
+    }, applyToken);
+  }
 
-    previewRebound(
-      myRole,
-      piece,
-      preview.path,
-      function () {
-        if (applyToken !== stateApplyToken) {
-          return;
-        }
-        inputLocked = false;
-        drawBoard();
-        updateStatus();
-      },
-      applyToken
-    );
+  function handleBoardClick(event) {
+    // A click that started a die-face drag is handled by the drag flow.
+    if (boardDragStarted) {
+      boardDragStarted = false;
+      return;
+    }
+    if (!canSelectPieces()) {
+      return;
+    }
+    // Click a staged piece to send its die back to the tray.
+    const piece = pieceAtEvent(event);
+    if (piece >= 0 && isPieceStaged(piece)) {
+      send({ action: "unstage_move", piece: piece });
+    }
   }
 
   function handleMessage(data) {
+    lastPingAt = Date.now();
+    if (checkBuild(data.build_id)) {
+      return;
+    }
     switch (data.type) {
+      case "server_info":
+      case "ping":
+        // Build id already checked above; nothing else to do.
+        break;
       case "welcome":
         myRole = data.role;
         clearSelection();
         lastMove = null;
+        lastFirstMove = null;
         drawBoard();
         updateStatus();
         break;
@@ -1322,11 +1862,13 @@
         handleState(data);
         break;
       case "game_over":
+        terminal = true;
         clearSelection();
         inputLocked = false;
         hopPos = null;
-        hideDie();
+        hide3dDice();
         turnBtn.disabled = true;
+        passBtn.disabled = true;
         resignBtn.disabled = true;
         if (data.winner === myRole) {
           showOverlay("You Win", "Your opponent resigned.");
@@ -1335,6 +1877,7 @@
         }
         break;
       case "error":
+        terminal = true;
         showOverlay("Unavailable", messageForError(data.message));
         break;
     }
@@ -1346,17 +1889,91 @@
     return "Could not join this room.";
   }
 
+  // ---- Server-update / reconnect plumbing ----
+  function checkBuild(buildId) {
+    if (!buildId || !pageBuildId || buildId === pageBuildId) {
+      return false;
+    }
+    applyServerUpdate();
+    return true;
+  }
+
+  function applyServerUpdate() {
+    if (updating) {
+      return;
+    }
+    updating = true;
+    clearWatchdog();
+    if (socket) {
+      try {
+        socket.onclose = null;
+        socket.close();
+      } catch (e) {
+        /* ignore */
+      }
+    }
+    showOverlay("Server updated", "Returning to the lobby…");
+    setTimeout(function () {
+      location.assign("/");
+    }, 700);
+  }
+
+  function clearWatchdog() {
+    if (watchdogTimer) {
+      clearInterval(watchdogTimer);
+      watchdogTimer = null;
+    }
+  }
+
+  function startWatchdog() {
+    clearWatchdog();
+    watchdogTimer = setInterval(function () {
+      if (updating || terminal) {
+        return;
+      }
+      // No heartbeat in a while: assume a dead socket and force a reconnect.
+      if (
+        socket &&
+        socket.readyState === WebSocket.OPEN &&
+        Date.now() - lastPingAt > HEARTBEAT_MS * 2
+      ) {
+        try {
+          socket.close();
+        } catch (e) {
+          /* ignore */
+        }
+      }
+    }, HEARTBEAT_MS);
+  }
+
   function connect() {
     socket = new WebSocket(
       wsUrl("/ws/room/" + encodeURIComponent(roomId) + "/?token=" +
         encodeURIComponent(token))
     );
+    socket.onopen = function () {
+      reconnectAttempts = 0;
+      lastPingAt = Date.now();
+      startWatchdog();
+    };
     socket.onmessage = function (event) {
       handleMessage(JSON.parse(event.data));
+    };
+    socket.onclose = function () {
+      // Don't reconnect when we're deliberately done or already leaving, or
+      // after the server told us this room is unusable.
+      if (updating || terminal || reconnectAttempts >= MAX_RECONNECT) {
+        return;
+      }
+      reconnectAttempts += 1;
+      setTimeout(connect, 1500);
     };
   }
 
   function send(payload) {
+    if (updating) {
+      return false;
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(JSON.stringify(payload));
       return true;
@@ -1373,32 +1990,149 @@
     }
 
     if (lastState.phase === "roll") {
-      if (!send({ action: "roll_die" })) {
+      if (!send({ action: "roll_dice" })) {
         return;
       }
       inputLocked = true;
       turnBtn.disabled = true;
       resignBtn.disabled = true;
-      statusEl.textContent = "Rolling die...";
+      statusEl.textContent = "Rolling dice...";
       return;
     }
 
-    if (lastState.phase === "select" && Number.isInteger(selectedPiece)) {
-      if (!send({ action: "confirm_move", piece: selectedPiece })) {
+    if (lastState.phase === "select" && lastState.can_confirm) {
+      if (!send({ action: "confirm_moves" })) {
         return;
       }
       inputLocked = true;
       turnBtn.disabled = true;
+      passBtn.disabled = true;
       resignBtn.disabled = true;
-      statusEl.textContent = "Confirming move...";
+      statusEl.textContent = "Confirming moves...";
     }
+  });
+
+  passBtn.addEventListener("click", function () {
+    if (passBtn.disabled || inputLocked || !lastState) return;
+    if (lastState.status !== "playing" || lastState.turn !== myRole) return;
+    if (lastState.phase !== "select") return;
+    send({ action: "pass_turn" });
   });
 
   resignBtn.addEventListener("click", function () {
     send({ action: "resign" });
   });
 
+  // -- drag a tray die onto a piece to assign it ------------------------
+  function endDrag() {
+    if (!dragState) return;
+    if (dragState.ghost && dragState.ghost.parentNode) {
+      dragState.ghost.parentNode.removeChild(dragState.ghost);
+    }
+    dragState = null;
+  }
+
+  function onDieDown(dieIndex) {
+    return function (event) {
+      if (!canSelectPieces()) return;
+      const value = dieValue(dieIndex);
+      if (value == null) return;
+      event.preventDefault();
+      const el = diceEls[dieIndex];
+      // If this die is already staged, dragging it cancels that assignment.
+      const fromPiece = (function () {
+        const staged = Array.isArray(lastState.staged) ? lastState.staged : [];
+        for (let i = 0; i < staged.length; i++) {
+          if (staged[i][1] === dieIndex) return staged[i][0];
+        }
+        return -1;
+      })();
+      startDieDrag(dieIndex, fromPiece, el, event);
+    };
+  }
+
+  // Begin dragging a die, whether grabbed from the tray or from its pending
+  // face on the board. A staged die is unstaged immediately so it can be
+  // dropped onto a new piece.
+  function startDieDrag(dieIndex, fromPiece, captureEl, event) {
+    if (fromPiece >= 0) {
+      send({ action: "unstage_move", piece: fromPiece });
+    }
+    const ghost = diceEls[dieIndex].cloneNode(true);
+    ghost.classList.add("die-ghost");
+    ghost.classList.remove("hidden");
+    document.body.appendChild(ghost);
+    dragState = {
+      dieIndex: dieIndex,
+      fromPiece: -1,
+      ghost: ghost,
+      pointerId: event.pointerId,
+    };
+    moveGhost(event);
+    captureEl.setPointerCapture && captureEl.setPointerCapture(event.pointerId);
+  }
+
+  // Click-and-hold a pending die face on the board to pick that die back up
+  // and reassign it, just like dragging the greyed-out tray die.
+  function onBoardPointerDown(event) {
+    boardDragStarted = false;
+    if (!canSelectPieces()) return;
+    const piece = pieceAtEvent(event);
+    if (piece < 0 || !isPieceStaged(piece)) return;
+    const dieIndex = dieOf(piece);
+    if (dieIndex < 0 || dieValue(dieIndex) == null) return;
+    event.preventDefault();
+    boardDragStarted = true;
+    startDieDrag(dieIndex, piece, canvas, event);
+  }
+
+  function moveGhost(event) {
+    if (!dragState || !dragState.ghost) return;
+    dragState.ghost.style.left = event.clientX + "px";
+    dragState.ghost.style.top = event.clientY + "px";
+  }
+
+  function onPointerMove(event) {
+    if (!dragState) return;
+    moveGhost(event);
+  }
+
+  function onPointerUp(event) {
+    if (!dragState) return;
+    const drag = dragState;
+    endDrag();
+    if (!canSelectPieces()) {
+      drawBoard();
+      updateStatus();
+      return;
+    }
+    const piece = pieceAtEvent(event);
+    if (piece < 0) {
+      // Dropped off the board: the die was already unstaged on pickup.
+      return;
+    }
+    const opt = pieceDiceOptions(piece)[drag.dieIndex];
+    if (opt && opt.legal) {
+      // Dropping onto a piece that already has a pending die replaces it.
+      send({ action: "stage_move", piece: piece, die_index: drag.dieIndex });
+    } else {
+      previewCollide(piece, drag.dieIndex);
+    }
+  }
+
+  diceEls.forEach(function (el, i) {
+    el.addEventListener("pointerdown", onDieDown(i));
+  });
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+
+  canvas.addEventListener("pointerdown", onBoardPointerDown);
   canvas.addEventListener("click", handleBoardClick);
+
+  // Re-render at the correct backing resolution when the display size or the
+  // device pixel ratio changes (window resize, zoom, or moving between
+  // monitors with different DPI).
+  window.addEventListener("resize", drawBoard);
 
   drawBoard();
   connect();

@@ -1,8 +1,24 @@
 """Django settings for the Lancer Advancer project."""
 import os
+import time
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+# Identifies this running server build. Changes on every (re)start so clients can
+# detect a deploy and reload. Honour an explicit build id or Fly's machine
+# version when present; otherwise fall back to the process start time.
+BUILD_ID = (
+    os.environ.get("BUILD_ID")
+    or os.environ.get("FLY_MACHINE_VERSION")
+    or str(int(time.time()))
+)
+
+# How often (seconds) each WebSocket pings the client with the current build id.
+HEARTBEAT_SECONDS = 15
 
 
 def _env_bool(name: str, default: bool) -> bool:
