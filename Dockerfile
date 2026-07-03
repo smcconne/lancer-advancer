@@ -15,8 +15,8 @@ COPY . .
 # DEBUG=false so the hashed/compressed manifest (staticfiles.json) is produced.
 RUN DJANGO_DEBUG=false python manage.py collectstatic --noinput
 
-EXPOSE 8000
+EXPOSE 8080
 
 # Single ASGI process (Daphne). Keep the deployment at one instance so the
 # in-memory channel layer and game state stay consistent for both players.
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]
+CMD ["sh", "-c", "daphne -b 0.0.0.0 -p ${PORT:-8080} config.asgi:application"]

@@ -13,7 +13,7 @@ console_command = '/code/manage.py shell'
   DJANGO_ALLOWED_HOSTS = 'lancer-advancer.fly.dev'
   DJANGO_CSRF_TRUSTED_ORIGINS = 'https://lancer-advancer.fly.dev'
   DJANGO_DEBUG = 'false'
-  PORT = '8000'
+  PORT = '8080'
 
 [http_service]
   internal_port = 8080
