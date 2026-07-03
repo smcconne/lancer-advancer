@@ -5,9 +5,13 @@
   const COLORS = {
     red: "#dc2626",
     blue: "#2563eb",
+    promotedRed: "#eda324",
+    promotedBlue: "#6e22b6",
     grid: "rgba(255, 255, 255, 0.12)",
     disk: "#ffffff",
-    diskOutline: "#0f172a",
+    diskGuest: "#111827",
+    diskOutline: "#111827",
+    diskGuestOutline: "#ffffff",
     youRing: "#38bdf8",
     selectedRing: "#f59e0b",
     illegalX: "#ef4444",
@@ -76,12 +80,11 @@
     );
   }
 
-  // First pass: tint artwork to solid black without disturbing its alpha.
+  // Rasterize and tint artwork without disturbing original alpha edges.
   // The SVG is rasterized into a supersampled offscreen canvas so edges stay
   // smooth when scaled onto the board, and "source-atop" recolors every
-  // covered pixel to black while leaving the original (antialiased) alpha
-  // channel untouched.
-  function makeBlackSilhouette(img) {
+  // covered pixel to the requested color while leaving antialiasing intact.
+  function makeSilhouette(img, color) {
     const w = img.naturalWidth;
     const h = img.naturalHeight;
     if (!w || !h) return null;
@@ -103,7 +106,7 @@
     c.imageSmoothingQuality = "high";
     c.drawImage(img, 0, 0, cw, ch);
     c.globalCompositeOperation = "source-atop";
-    c.fillStyle = "#000";
+    c.fillStyle = color || "#000";
     c.fillRect(0, 0, cw, ch);
     return canvas;
   }
@@ -113,7 +116,7 @@
   let lanceBgBlackCanvas = null;
   const lanceBgImg = new Image();
   lanceBgImg.onload = function () {
-    lanceBgBlackCanvas = makeBlackSilhouette(lanceBgImg);
+    lanceBgBlackCanvas = makeSilhouette(lanceBgImg);
     lanceBgReady = true;
     drawBoard();
   };
@@ -125,7 +128,7 @@
   let helmetBgBlackCanvas = null;
   const helmetBgImg = new Image();
   helmetBgImg.onload = function () {
-    helmetBgBlackCanvas = makeBlackSilhouette(helmetBgImg);
+    helmetBgBlackCanvas = makeSilhouette(helmetBgImg);
     helmetBgReady = true;
     drawBoard();
   };
@@ -137,12 +140,37 @@
   let checkBgBlackCanvas = null;
   const checkBgImg = new Image();
   checkBgImg.onload = function () {
-    checkBgBlackCanvas = makeBlackSilhouette(checkBgImg);
+    checkBgBlackCanvas = makeSilhouette(checkBgImg);
     checkBgReady = true;
     drawBoard();
   };
   if (window.CHECK_BG_URL) {
     checkBgImg.src = window.CHECK_BG_URL;
+  }
+
+  // Piece icon variants by orientation (up/down) and owner color (dark/white).
+  let knightUpDarkCanvas = null;
+  let knightUpWhiteCanvas = null;
+  const knightUpImg = new Image();
+  knightUpImg.onload = function () {
+    knightUpDarkCanvas = makeSilhouette(knightUpImg, COLORS.diskOutline);
+    knightUpWhiteCanvas = makeSilhouette(knightUpImg, COLORS.diskGuestOutline);
+    drawBoard();
+  };
+  if (window.KNIGHT_LANCE_UP_URL) {
+    knightUpImg.src = window.KNIGHT_LANCE_UP_URL;
+  }
+
+  let knightDownDarkCanvas = null;
+  let knightDownWhiteCanvas = null;
+  const knightDownImg = new Image();
+  knightDownImg.onload = function () {
+    knightDownDarkCanvas = makeSilhouette(knightDownImg, COLORS.diskOutline);
+    knightDownWhiteCanvas = makeSilhouette(knightDownImg, COLORS.diskGuestOutline);
+    drawBoard();
+  };
+  if (window.KNIGHT_LANCE_DOWN_URL) {
+    knightDownImg.src = window.KNIGHT_LANCE_DOWN_URL;
   }
   const statusEl = document.getElementById("status");
   const turnBtn = document.getElementById("turn-btn");
@@ -457,12 +485,14 @@
     );
   }
 
-  function flashingSelectableStroke() {
+  function flashingSelectableStroke(guestPiece) {
     // Smoothly blend between established highlight and outline colors.
     const t = Date.now() / 1000;
     const mix = (Math.sin(t * Math.PI * 2) + 1) / 2;
     const start = { r: 56, g: 189, b: 248 }; // COLORS.youRing
-    const end = { r: 0, g: 0, b: 0 }; // black
+    const end = guestPiece
+      ? { r: 255, g: 255, b: 255 } // white guest-piece outline
+      : { r: 0, g: 0, b: 0 }; // black host-piece outline
     const r = Math.round(start.r * mix + end.r * (1 - mix));
     const g = Math.round(start.g * mix + end.g * (1 - mix));
     const b = Math.round(start.b * mix + end.b * (1 - mix));
@@ -777,28 +807,144 @@
     ctx.restore();
   }
 
+  function mirrorSignForCell(pos) {
+    if (!isCell(pos)) return 1;
+    const local = toLocal(pos[0], pos[1]);
+    const lr = local[0];
+    return lr === 0 || lr === 2 ? -1 : 1;
+  }
+
+  function iconDownForCell(pos) {
+    if (!isCell(pos)) return false;
+    const local = toLocal(pos[0], pos[1]);
+    const lr = local[0];
+    return lr === 0 || lr === ROWS - 1;
+  }
+
+  function computeFlipMeta(points, isPromotion) {
+    if (!Array.isArray(points) || points.length < 2) return null;
+    const cells = points.filter(isCell);
+    if (cells.length < 2) return null;
+
+    const origin = cells[0];
+    const dest = cells[cells.length - 1];
+    let pCross = null;
+    for (let i = 0; i < cells.length - 1; i++) {
+      if (mirrorSignForCell(cells[i]) !== mirrorSignForCell(cells[i + 1])) {
+        pCross = i + 0.5;
+        break;
+      }
+    }
+
+    return {
+      pCross: pCross,
+      endProgress: cells.length - 1,
+      originSign: mirrorSignForCell(origin),
+      destSign: mirrorSignForCell(dest),
+      originDown: iconDownForCell(origin),
+      destDown: iconDownForCell(dest),
+      isPromotion: !!isPromotion,
+    };
+  }
+
   function drawDisk(pos, who, opts) {
     if (!isCell(pos)) return;
     const [lr, lc] = toLocal(pos[0], pos[1]);
     const cx = lc * CELL + CELL / 2;
     const cy = lr * CELL + CELL / 2;
+    const radius = CELL * 0.32;
 
     const selected = !!(opts && opts.selected);
     const movedLast = !!(opts && opts.movedLast);
     const flashOutline = !!(opts && opts.flashOutline);
     const moving = !!(opts && opts.moving);
-    const stroke = flashOutline
-      ? flashingSelectableStroke()
-      : selected
-        ? COLORS.youRing
-      : movedLast
-        ? COLORS.youRing
-        : COLORS.diskOutline;
+    const promoted = !!(opts && opts.promoted);
+    const guestPiece = who === "guest";
+    const fill = promoted
+      ? (who === "guest" ? COLORS.promotedBlue : COLORS.promotedRed)
+      : guestPiece
+        ? COLORS.diskGuest
+        : COLORS.disk;
+    const baseStroke = guestPiece ? COLORS.diskGuestOutline : COLORS.diskOutline;
+
+    let useDownIcon = lr === 0 || lr === ROWS - 1;
+    let iconScaleX = lr === 0 || lr === 2 ? -1 : 1;
+    let flipActive = false;
+    const flip = opts && opts.flip;
+    const flipProgress = opts && typeof opts.flipProgress === "number"
+      ? opts.flipProgress
+      : 0;
+    if (moving && flip) {
+      const endProgress = Math.max(0, Number(flip.endProgress) || 0);
+      const progress = clamp(flipProgress, 0, endProgress);
+      const originSign = Number(flip.originSign) || 1;
+      const destSign = Number(flip.destSign) || originSign;
+      const originDown = !!flip.originDown;
+      const destDown = !!flip.destDown;
+      const pCross =
+        typeof flip.pCross === "number" && Number.isFinite(flip.pCross)
+          ? flip.pCross
+          : null;
+
+      if (pCross === null || pCross <= 0 || pCross >= endProgress) {
+        iconScaleX = originSign;
+        useDownIcon = originDown;
+      } else {
+        flipActive = true;
+        useDownIcon = progress < pCross ? originDown : destDown;
+        if (progress <= pCross) {
+          const t = clamp(progress / pCross, 0, 1);
+          iconScaleX = originSign * (1 - t);
+        } else {
+          const tail = endProgress - pCross;
+          const t = clamp((progress - pCross) / tail, 0, 1);
+          iconScaleX = destSign * t;
+        }
+      }
+    }
+
+    // While a flip is running the whole disk collapses horizontally with the
+    // icon, passing through a vertical light-blue line at the midpoint.
+    const radiusX = flipActive ? radius * Math.abs(iconScaleX) : radius;
+    const stroke = flipActive
+      ? COLORS.youRing
+      : flashOutline
+        ? flashingSelectableStroke(guestPiece)
+        : selected
+          ? COLORS.youRing
+        : movedLast
+          ? COLORS.youRing
+          : baseStroke;
 
     ctx.beginPath();
-    ctx.arc(cx, cy, CELL * 0.32, 0, Math.PI * 2);
-    ctx.fillStyle = COLORS.disk;
+    ctx.ellipse(cx, cy, radiusX, radius, 0, 0, Math.PI * 2);
+    ctx.fillStyle = fill;
     ctx.fill();
+
+    const iconCanvas = guestPiece
+      ? (useDownIcon ? knightDownWhiteCanvas : knightUpWhiteCanvas)
+      : (useDownIcon ? knightDownDarkCanvas : knightUpDarkCanvas);
+    if (iconCanvas && iconScaleX !== 0) {
+      const iconSize = CELL * 0.7;
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, radiusX, radius, 0, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.translate(cx, 0);
+      ctx.scale(iconScaleX, 1);
+      ctx.translate(-cx, 0);
+      ctx.drawImage(
+        iconCanvas,
+        cx - iconSize / 2,
+        cy - iconSize / 2,
+        iconSize,
+        iconSize
+      );
+      ctx.restore();
+    }
+
+    ctx.beginPath();
+    ctx.ellipse(cx, cy, radiusX, radius, 0, 0, Math.PI * 2);
     ctx.lineWidth = 4;
     ctx.strokeStyle = stroke;
     ctx.stroke();
@@ -809,11 +955,51 @@
     return role === selectingRole() && isPieceStaged(piece);
   }
 
-  function drawRoleDisks(role, selectedOnly) {
+  function isPiecePromoted(role, piece) {
+    // Committed promotions from the server, plus a live preview: a staged
+    // piece shows as promoted while its assigned die's path crosses the
+    // threshold (reverting to white if the die is taken back).
+    if (
+      lastState &&
+      lastState.promoted &&
+      Array.isArray(lastState.promoted[role]) &&
+      lastState.promoted[role][piece]
+    ) {
+      return true;
+    }
+    if (role === selectingRole() && isPieceStaged(piece)) {
+      const opt = pieceDiceOptions(piece)[dieOf(piece)];
+      if (opt && opt.promotes) {
+        if (
+          hopPos &&
+          hopPos.role === role &&
+          hopPos.pieceIndex === piece &&
+          typeof hopPos.progress === "number" &&
+          Number.isInteger(opt.promotes_at)
+        ) {
+          // While the hop animation runs, stay white until the piece
+          // physically crosses the boundary into the threshold cell:
+          // path index promotes_at is reached at progress promotes_at + 1,
+          // and the cell boundary sits half a segment before that.
+          return hopPos.progress >= opt.promotes_at + 0.5;
+        }
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function drawRoleDisks(role, selectedOnly, skipMovingPiece) {
     const disks = roleDisks(lastState, role);
     for (let piece = 0; piece < disks.length; piece++) {
       const basePos = disks[piece];
       if (!isCell(basePos)) continue;
+
+      const moving =
+        !!hopPos &&
+        hopPos.role === role &&
+        hopPos.pieceIndex === piece;
+      if (skipMovingPiece && moving) continue;
 
       const selected = isPieceSelected(role, piece);
       if (selectedOnly === true && !selected) continue;
@@ -855,17 +1041,65 @@
         (role === myRole &&
           canSelectPieces() &&
           !isPieceStaged(piece));
-      const moving =
-        !!hopPos &&
-        hopPos.role === role &&
-        hopPos.pieceIndex === piece;
       drawDisk(drawPos, role, {
         selected: selected,
         movedLast: movedLast,
         flashOutline: flashOutline,
         moving: moving,
+        promoted: isPiecePromoted(role, piece),
       });
     }
+  }
+
+  function drawMovingDiskOnTop() {
+    if (!hopPos || !lastState || !lastState.disks) return;
+    const role = hopPos.role;
+    const piece = hopPos.pieceIndex;
+    const disks = roleDisks(lastState, role);
+    const basePos = disks[piece];
+    if (!isCell(basePos)) return;
+
+    let drawPos = basePos;
+    if (isCell(hopPos.pos)) {
+      drawPos = hopPos.pos;
+    }
+
+    const selected = isPieceSelected(role, piece);
+    const movedLast =
+      !!lastState &&
+      lastState.last_mover === role &&
+      (lastState.moved_piece === piece ||
+        (Number.isInteger(lastState.first_moved_piece) &&
+          lastState.first_moved_piece === piece)) &&
+      !waitingForOpponentToSelectPiece();
+    const opponentSelecting =
+      waitingForOpponentToSelectPiece() &&
+      role !== myRole;
+    const flashOutline =
+      (opponentSelecting && !selected) ||
+      (role === myRole &&
+        canSelectPieces() &&
+        !isPieceStaged(piece));
+
+    let promoted = isPiecePromoted(role, piece);
+    if (
+      hopPos.flip &&
+      hopPos.flip.isPromotion &&
+      typeof hopPos.flip.pCross === "number" &&
+      typeof hopPos.progress === "number"
+    ) {
+      promoted = hopPos.progress >= hopPos.flip.pCross;
+    }
+
+    drawDisk(drawPos, role, {
+      selected: selected,
+      movedLast: movedLast,
+      flashOutline: flashOutline,
+      moving: true,
+      promoted: promoted,
+      flip: hopPos.flip,
+      flipProgress: hopPos.progress,
+    });
   }
 
   // Draws transparent jousting-lance images, rotated, over each player's half:
@@ -1019,6 +1253,10 @@
     const arrowOverlay = currentArrowOverlay();
     const staged = stagedArrowOverlays();
     const greyFirst = staged.length >= 2;
+    const inRollPreviewState =
+      !!lastState &&
+      lastState.status === "playing" &&
+      lastState.phase === "roll";
     // The opponent's committed first move (of two) is shown greyed beneath
     // the pieces, just like our own staged first move.
     const greyCommitted =
@@ -1048,14 +1286,24 @@
       );
     }
 
-    if (lastState && lastState.disks) {
-      drawRoleDisks("host", false);
-      drawRoleDisks("guest", false);
+    if (inRollPreviewState && staged.length === 0 && arrowOverlay) {
+      drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover, { grey: true });
+      drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover, { grey: true });
+      drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover, {
+        grey: true,
+      });
     }
 
     if (lastState && lastState.disks) {
-      drawRoleDisks("host", true);
-      drawRoleDisks("guest", true);
+      const skipMovingPiece = !!hopPos;
+      drawRoleDisks("host", false, skipMovingPiece);
+      drawRoleDisks("guest", false, skipMovingPiece);
+    }
+
+    if (lastState && lastState.disks) {
+      const skipMovingPiece = !!hopPos;
+      drawRoleDisks("host", true, skipMovingPiece);
+      drawRoleDisks("guest", true, skipMovingPiece);
     }
 
     // Staged move arrows drawn on top of the pieces. When a second move is
@@ -1067,11 +1315,13 @@
       drawTrackDie(ov.track[0], ov.roll, ov.mover);
     });
 
-    if (staged.length === 0 && arrowOverlay) {
+    if (staged.length === 0 && arrowOverlay && !inRollPreviewState) {
       drawMoveArrowShaft(arrowOverlay.track, arrowOverlay.mover);
       drawMoveArrowHead(arrowOverlay.track, arrowOverlay.mover);
       drawTrackDie(arrowOverlay.track[0], arrowOverlay.roll, arrowOverlay.mover);
     }
+
+    drawMovingDiskOnTop();
 
     if (illegalOverlay && Array.isArray(illegalOverlay.track)) {
       drawIllegalX(illegalOverlay.track);
@@ -1407,7 +1657,7 @@
     setCubeRotation(targetX, targetY);
   }
 
-  function hopPiece(role, pieceIndex, path, onDone, applyToken, stepMs, settleMs) {
+  function hopPiece(role, pieceIndex, path, onDone, applyToken, stepMs, settleMs, flipOpts) {
     const hops = Array.isArray(path) ? path.filter(isCell) : [];
     if (hops.length === 0) {
       if (onDone) onDone();
@@ -1417,6 +1667,7 @@
     const baseStart = pieceCell(lastState, role, pieceIndex);
     const startPos = isCell(baseStart) ? baseStart : hops[0];
     const points = [startPos].concat(hops);
+    const flipMeta = computeFlipMeta(points, !!(flipOpts && flipOpts.isPromotion));
     const segmentCount = Math.max(1, points.length - 1);
     const durationMs = Math.max(stepMs * segmentCount, 180);
     const startTime = performance.now();
@@ -1447,7 +1698,13 @@
         a[1] + (b[1] - a[1]) * localT,
       ];
 
-      hopPos = { role: role, pieceIndex: pieceIndex, pos: pos };
+      hopPos = {
+        role: role,
+        pieceIndex: pieceIndex,
+        pos: pos,
+        progress: pathT,
+        flip: flipMeta,
+      };
       drawBoard();
 
       if (rawT >= 1) {
@@ -1455,6 +1712,8 @@
           role: role,
           pieceIndex: pieceIndex,
           pos: points[points.length - 1],
+          progress: segmentCount,
+          flip: flipMeta,
         };
         drawBoard();
         setTimeout(function () {
@@ -1497,7 +1756,8 @@
       },
       applyToken,
       110,
-      70
+      70,
+      { isPromotion: false }
     );
   }
 
@@ -1734,6 +1994,16 @@
       lastState = previousState || data;
       turnBtn.disabled = true;
       resignBtn.disabled = true;
+      const promotedBefore =
+        !!previousState &&
+        !!previousState.promoted &&
+        Array.isArray(previousState.promoted[data.last_mover]) &&
+        !!previousState.promoted[data.last_mover][data.moved_piece];
+      const promotedAfter =
+        !!data.promoted &&
+        Array.isArray(data.promoted[data.last_mover]) &&
+        !!data.promoted[data.last_mover][data.moved_piece];
+      const isPromotionMove = !promotedBefore && promotedAfter;
 
       hopPiece(
         data.last_mover,
@@ -1752,7 +2022,8 @@
         },
         applyToken,
         180,
-        150
+        150,
+        { isPromotion: isPromotionMove }
       );
       return;
     }
@@ -1772,7 +2043,7 @@
           hopPos = null;
           drawBoard();
           updateStatus();
-        }, applyToken, 160, 110);
+        }, applyToken, 160, 110, { isPromotion: !!(opt && opt.promotes) });
         drawBoard();
         updateStatus();
         return;
@@ -1870,7 +2141,13 @@
         turnBtn.disabled = true;
         passBtn.disabled = true;
         resignBtn.disabled = true;
-        if (data.winner === myRole) {
+        if (data.reason === "promotion") {
+          if (data.winner === myRole) {
+            showOverlay("You Win", "You promoted all four pieces.");
+          } else {
+            showOverlay("You Lose", "Your opponent promoted all four pieces.");
+          }
+        } else if (data.winner === myRole) {
           showOverlay("You Win", "Your opponent resigned.");
         } else {
           showOverlay("You Lose", "You resigned the game.");

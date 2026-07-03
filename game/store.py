@@ -38,6 +38,12 @@ class Room:
     guest_indices: list[int] = field(
         default_factory=lambda: list(gl.START_INDICES)
     )
+    host_promoted: list[bool] = field(
+        default_factory=lambda: [False] * gl.NUM_PIECES
+    )
+    guest_promoted: list[bool] = field(
+        default_factory=lambda: [False] * gl.NUM_PIECES
+    )
     pending_dice: list[int] | None = None  # two values while choosing moves
     staged: dict[int, int] = field(default_factory=dict)  # piece -> die index
     last_roll: int | None = None
@@ -240,11 +246,15 @@ class GameStore:
 
             last_piece = None
             last_die = None
+            promoted = self._promoted_for_role(room, role)
             moves = list(room.staged.items())  # insertion order: first .. last
             for piece, die_index in moves:
-                indices[piece] = gl.advance(indices[piece], room.pending_dice[die_index])
+                steps = room.pending_dice[die_index]
+                if gl.crosses_promotion(indices[piece], steps):
+                    promoted[piece] = True
+                indices[piece] = gl.advance(indices[piece], steps)
                 last_piece = piece
-                last_die = room.pending_dice[die_index]
+                last_die = steps
 
             if len(moves) >= 2:
                 first_piece, first_die_index = moves[0]
@@ -262,6 +272,10 @@ class GameStore:
             room.pending_dice = None
             room.staged = {}
             room.no_legal_move = False
+            if all(promoted):
+                room.status = OVER
+                room.winner = role
+                room.turn = None
             room.state_version += 1
             return room
 
@@ -286,11 +300,13 @@ class GameStore:
             ):
                 return None
             # Apply whatever was staged before passing.
+            promoted = self._promoted_for_role(room, role)
             moves = list(room.staged.items())
             for piece, die_index in moves:
-                indices[piece] = gl.advance(
-                    indices[piece], room.pending_dice[die_index]
-                )
+                steps = room.pending_dice[die_index]
+                if gl.crosses_promotion(indices[piece], steps):
+                    promoted[piece] = True
+                indices[piece] = gl.advance(indices[piece], steps)
             room.phase = PHASE_ROLL
             room.turn = gl.GUEST if role == gl.HOST else gl.HOST
             room.last_mover = role
@@ -309,6 +325,10 @@ class GameStore:
             room.pending_dice = None
             room.staged = {}
             room.no_legal_move = True
+            if all(promoted):
+                room.status = OVER
+                room.winner = role
+                room.turn = None
             room.state_version += 1
             return room
 
@@ -411,6 +431,7 @@ class GameStore:
                 }
                 die_options = []
                 for die_index, die in enumerate(dice):
+                    promo_step = gl.promotion_step(idx, die)
                     die_options.append(
                         {
                             "die_index": die_index,
@@ -425,6 +446,13 @@ class GameStore:
                                 [r, c]
                                 for (r, c) in gl.loop_path(room.turn, idx, die)
                             ],
+                            "promotes": promo_step is not None,
+                            # 0-based index into ``path`` of the threshold
+                            # cell, so the client can flip the piece to red
+                            # mid-animation exactly when it crosses.
+                            "promotes_at": (
+                                None if promo_step is None else promo_step - 1
+                            ),
                         }
                     )
                 previews.append({"piece": piece, "dice": die_options})
@@ -462,11 +490,19 @@ class GameStore:
                 "host": host_disks,
                 "guest": guest_disks,
             },
+            "promoted": {
+                "host": list(room.host_promoted),
+                "guest": list(room.guest_promoted),
+            },
         }
 
     @staticmethod
     def _indices_for_role(room: Room, role: str) -> list[int]:
         return room.host_indices if role == gl.HOST else room.guest_indices
+
+    @staticmethod
+    def _promoted_for_role(room: Room, role: str) -> list[bool]:
+        return room.host_promoted if role == gl.HOST else room.guest_promoted
 
     # -- internals ---------------------------------------------------------
     def _new_id(self) -> str:

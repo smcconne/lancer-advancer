@@ -10,7 +10,7 @@ class GameLogicTests(SimpleTestCase):
     def test_loop_basics(self):
         self.assertEqual(gl.LOOP_LEN, 12)
         self.assertEqual(gl.LOCAL_LOOP[0], (3, 5))  # bottom-right start
-        self.assertEqual(gl.START_INDICES, [0, 11, 10, 9])
+        self.assertEqual(gl.START_INDICES, [7, 8, 9, 10])
         self.assertEqual(gl.NUM_PIECES, 4)
         # No duplicate cells in the loop.
         self.assertEqual(len(set(gl.LOCAL_LOOP)), 12)
@@ -35,26 +35,26 @@ class GameLogicTests(SimpleTestCase):
         self.assertEqual(gl.canonical_loop(gl.GUEST), expected)
 
     def test_start_positions(self):
-        # Each player's four disks start along their own bottom-right row.
+        # Each player's four disks start along their own bottom-left row.
         self.assertEqual(
             [
                 gl.canonical_position(gl.HOST, idx)
                 for idx in gl.START_INDICES
             ],
-            [(3, 5), (3, 4), (3, 3), (3, 2)],
+            [(3, 0), (3, 1), (3, 2), (3, 3)],
         )
         self.assertEqual(
             [
                 gl.canonical_position(gl.GUEST, idx)
                 for idx in gl.START_INDICES
             ],
-            [(0, 0), (0, 1), (0, 2), (0, 3)],
+            [(0, 5), (0, 4), (0, 3), (0, 2)],
         )
 
-    def test_guest_start_is_bottom_right_in_local_view(self):
-        # Canonical (0,0) should map to the guest's local bottom-right (3,5).
+    def test_guest_start_is_bottom_left_in_local_view(self):
+        # Canonical (0,5) should map to the guest's local bottom-left (3,0).
         r, c = gl.canonical_position(gl.GUEST, gl.START_INDEX)
-        self.assertEqual(gl.to_local(gl.GUEST, r, c), (3, 5))
+        self.assertEqual(gl.to_local(gl.GUEST, r, c), (3, 0))
 
     def test_transform_is_involution(self):
         for r in range(gl.ROWS):
@@ -68,6 +68,27 @@ class GameLogicTests(SimpleTestCase):
     def test_advance_multi_step(self):
         self.assertEqual(gl.advance(0, 4), 4)
         self.assertEqual(gl.advance(10, 4), 2)
+
+    def test_crosses_promotion(self):
+        # The threshold is the seam between index 6 (own top-left cell) and
+        # index 7 (own bottom-left cell); visiting index 7 crosses it.
+        self.assertTrue(gl.crosses_promotion(6, 1))  # lands exactly on it
+        self.assertTrue(gl.crosses_promotion(5, 3))  # passes through it
+        self.assertTrue(gl.crosses_promotion(3, 4))  # reaches it on last step
+        self.assertTrue(gl.crosses_promotion(1, 6))  # max roll reaches it
+        self.assertFalse(gl.crosses_promotion(7, 6))  # starts just past it
+        self.assertFalse(gl.crosses_promotion(8, 3))
+        self.assertFalse(gl.crosses_promotion(10, 6))  # wraps but stops short
+        self.assertFalse(gl.crosses_promotion(6, 0))  # no movement, no cross
+
+    def test_promotion_step(self):
+        # 1-based offset of the step that lands on the threshold cell.
+        self.assertEqual(gl.promotion_step(6, 1), 1)
+        self.assertEqual(gl.promotion_step(5, 3), 2)
+        self.assertEqual(gl.promotion_step(3, 4), 4)
+        self.assertEqual(gl.promotion_step(1, 6), 6)
+        self.assertIsNone(gl.promotion_step(7, 6))
+        self.assertIsNone(gl.promotion_step(8, 3))
 
     def test_roll_die_maps_randbelow_values(self):
         with patch("game.game_logic.secrets.randbelow", side_effect=[0, 1, 2, 3, 4, 5]):
@@ -94,12 +115,12 @@ class GameLogicTests(SimpleTestCase):
             self.assertEqual(abs(r1 - r2) + abs(c1 - c2), 1)
 
     def test_legal_piece_moves_single_legal_from_start(self):
-        # Roll=1 from [0,11,10,9] only allows piece 0 -> index 1.
-        self.assertEqual(gl.legal_piece_moves([0, 11, 10, 9], 1), [0])
+        # Roll=1 from [7,8,9,10] only allows piece 3 -> index 11.
+        self.assertEqual(gl.legal_piece_moves([7, 8, 9, 10], 1), [3])
 
     def test_legal_piece_moves_three_legal_from_start(self):
-        # Roll=3 targets [3,2,1,0]; last target is occupied by piece 0.
-        self.assertEqual(gl.legal_piece_moves([0, 11, 10, 9], 3), [0, 1, 2])
+        # Roll=3 targets [10,11,0,1]; first target is occupied by piece 3.
+        self.assertEqual(gl.legal_piece_moves([7, 8, 9, 10], 3), [1, 2, 3])
 
     def test_legal_piece_moves_none_legal(self):
         # Every target is occupied by another own piece.
@@ -110,32 +131,32 @@ class GameLogicTests(SimpleTestCase):
             self.assertEqual(gl.roll_dice(), [3, 6])
 
     def test_can_stage_blocks_same_die_or_piece(self):
-        indices = [0, 11, 10, 9]
+        indices = [7, 8, 9, 10]
         dice = [2, 4]
         # First assignment is fine.
-        self.assertTrue(gl.can_stage(indices, dice, {}, 0, 0))
+        self.assertTrue(gl.can_stage(indices, dice, {}, 3, 0))
         # Same die can't be reused; same piece can't take two dice.
-        self.assertFalse(gl.can_stage(indices, dice, {0: 0}, 1, 0))
-        self.assertFalse(gl.can_stage(indices, dice, {0: 0}, 0, 1))
+        self.assertFalse(gl.can_stage(indices, dice, {3: 0}, 1, 0))
+        self.assertFalse(gl.can_stage(indices, dice, {3: 0}, 3, 1))
 
     def test_second_piece_may_land_on_first_piece_start(self):
-        # Piece 0 at idx 0 takes die0=2 -> idx2. Piece 1 at idx10 takes die1=2
-        # -> idx0 (piece 0's vacated start) which is now free, so it is legal.
-        indices = [0, 11, 10, 9]
+        # Piece 3 at idx10 takes die0=2 -> idx0. Piece 1 at idx8 takes die1=2
+        # -> idx10 (piece 3's vacated start) which is now free, so it is legal.
+        indices = [7, 8, 9, 10]
         dice = [2, 2]
-        self.assertTrue(gl.can_stage(indices, dice, {0: 0}, 2, 1))
+        self.assertTrue(gl.can_stage(indices, dice, {3: 0}, 1, 1))
 
     def test_unstage_first_makes_second_collide(self):
-        # With both staged the pair is collision-free, but if piece 0 is
-        # removed, piece 2's destination (idx0) collides with piece 0's start.
-        indices = [0, 11, 10, 9]
+        # With both staged the pair is collision-free, but if piece 3 is
+        # removed, piece 1's destination (idx10) collides with piece 3's start.
+        indices = [7, 8, 9, 10]
         dice = [2, 2]
-        staged = {0: 0, 2: 1}
+        staged = {3: 0, 1: 1}
         self.assertEqual(gl.staged_collisions(indices, dice, staged), set())
-        del staged[0]
-        self.assertEqual(gl.staged_collisions(indices, dice, staged), {2})
+        del staged[3]
+        self.assertEqual(gl.staged_collisions(indices, dice, staged), {1})
 
     def test_has_any_legal_assignment(self):
-        self.assertTrue(gl.has_any_legal_assignment([0, 11, 10, 9], [1, 2], {}))
+        self.assertTrue(gl.has_any_legal_assignment([7, 8, 9, 10], [1, 2], {}))
         self.assertFalse(gl.has_any_legal_assignment([0, 3, 6, 9], [3, 3], {}))
 

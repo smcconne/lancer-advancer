@@ -181,17 +181,42 @@ class GameConsumer(AsyncWebsocketConsumer):
             if store.unstage_move(self.room_id, self.role, data.get("piece")) is not None:
                 await self._broadcast_state()
         elif action == "confirm_moves":
-            if store.confirm_moves(self.room_id, self.role) is not None:
+            room = store.confirm_moves(self.room_id, self.role)
+            if room is not None:
                 await self._broadcast_state()
+                if room.winner is not None:
+                    await self.channel_layer.group_send(
+                        self.group,
+                        {
+                            "type": "game_over",
+                            "winner": room.winner,
+                            "reason": "promotion",
+                        },
+                    )
         elif action == "pass_turn":
-            if store.pass_turn(self.room_id, self.role) is not None:
+            room = store.pass_turn(self.room_id, self.role)
+            if room is not None:
                 await self._broadcast_state()
+                if room.winner is not None:
+                    await self.channel_layer.group_send(
+                        self.group,
+                        {
+                            "type": "game_over",
+                            "winner": room.winner,
+                            "reason": "promotion",
+                        },
+                    )
         elif action == "resign":
             room = store.resign(self.room_id, self.role)
             if room is not None:
                 await self._broadcast_state()
                 await self.channel_layer.group_send(
-                    self.group, {"type": "game_over", "winner": room.winner}
+                    self.group,
+                    {
+                        "type": "game_over",
+                        "winner": room.winner,
+                        "reason": "resign",
+                    },
                 )
 
     # -- group event handlers ---------------------------------------------
@@ -203,7 +228,11 @@ class GameConsumer(AsyncWebsocketConsumer):
     async def game_over(self, event):
         await self.send(
             text_data=json.dumps(
-                {"type": "game_over", "winner": event["winner"]}
+                {
+                    "type": "game_over",
+                    "winner": event["winner"],
+                    "reason": event.get("reason", "resign"),
+                }
             )
         )
 

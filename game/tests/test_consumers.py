@@ -70,14 +70,14 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         self.assertIsNone(playing["move_from"])
         self.assertEqual(playing["previews"], [])
         self.assertEqual(playing["path"], [])
-        # Both sides start with four disks along their own bottom-right row.
+        # Both sides start with four disks along their own bottom-left row.
         self.assertEqual(
             playing["disks"]["host"],
-            [[3, 5], [3, 4], [3, 3], [3, 2]],
+            [[3, 0], [3, 1], [3, 2], [3, 3]],
         )
         self.assertEqual(
             playing["disks"]["guest"],
-            [[0, 0], [0, 1], [0, 2], [0, 3]],
+            [[0, 5], [0, 4], [0, 3], [0, 2]],
         )
         await host.disconnect()
         await guest.disconnect()
@@ -119,7 +119,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
         await recv_until(host, "state")
         await recv_until(guest, "state")
-        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        await comm.send_json_to({"action": "stage_move", "piece": 2, "die_index": 1})
         staged_state = await recv_until(host, "state")
         await recv_until(guest, "state")
         self.assertTrue(staged_state["can_confirm"])
@@ -134,7 +134,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
 
         expected_indices = list(gl.START_INDICES)
         expected_indices[0] = gl.advance(expected_indices[0], 4)
-        expected_indices[1] = gl.advance(expected_indices[1], 3)
+        expected_indices[2] = gl.advance(expected_indices[2], 3)
         expected_disks = [
             list(gl.canonical_position(mover, idx))
             for idx in expected_indices
@@ -160,7 +160,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         self.assertGreater(state_after_roll["version"], first_version)
         self.assertEqual(state_after_roll["phase"], "select")
 
-        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await comm.send_json_to({"action": "stage_move", "piece": 3, "die_index": 0})
         state_after_confirm = await recv_until(host, "state")
         await recv_until(guest, "state")
 
@@ -202,7 +202,7 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
             await recv_until(host, "state")
             await recv_until(guest, "state")
 
-        # From [0,11,10,9] with die=1 only piece 0 can move; piece 1 is blocked.
+        # From [7,8,9,10] with die=1 only piece 3 can move; piece 1 is blocked.
         await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 0})
         self.assertTrue(await comm.receive_nothing(timeout=0.3))
 
@@ -317,10 +317,114 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         # Opponent (guest) wins when host resigns.
         self.assertEqual(host_over["winner"], "guest")
         self.assertEqual(guest_over["winner"], "guest")
+        self.assertEqual(host_over["reason"], "resign")
+        self.assertEqual(guest_over["reason"], "resign")
 
         state = store.get(room.id)
         self.assertEqual(state.status, "over")
         self.assertEqual(state.winner, "guest")
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_promotion_crossing_sets_promoted_flag(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+
+        state = store.get(room.id)
+        # Piece 0 sits on index 6 (own top-left), one step before the
+        # promotion threshold at index 7 (own bottom-left).
+        indices = [6, 0, 2, 4]
+        if mover == "host":
+            state.host_indices = indices[:]
+        else:
+            state.guest_indices = indices[:]
+
+        with patch("game.game_logic.roll_dice", return_value=[2, 3]):
+            await comm.send_json_to({"action": "roll_dice"})
+            after = await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        # Previews flag options whose path crosses the threshold, with the
+        # 0-based path index of the crossing for mid-animation recoloring.
+        self.assertTrue(after["previews"][0]["dice"][0]["promotes"])
+        self.assertEqual(after["previews"][0]["dice"][0]["promotes_at"], 0)
+        self.assertFalse(after["previews"][1]["dice"][0]["promotes"])
+        self.assertIsNone(after["previews"][1]["dice"][0]["promotes_at"])
+        # Nothing is promoted until the move is committed.
+        self.assertEqual(after["promoted"][mover], [False] * 4)
+
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        staged = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertEqual(staged["promoted"][mover], [False] * 4)
+
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "confirm_moves"})
+        confirmed = await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        self.assertEqual(
+            confirmed["promoted"][mover], [True, False, False, False]
+        )
+        self.assertEqual(confirmed["status"], "playing")
+        # No game over: only one piece has promoted.
+        self.assertTrue(await comm.receive_nothing(timeout=0.3))
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_promoting_all_four_pieces_wins(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+
+        state = store.get(room.id)
+        # Three pieces already promoted; piece 0 is one step short.
+        indices = [6, 9, 11, 2]
+        promoted = [False, True, True, True]
+        if mover == "host":
+            state.host_indices = indices[:]
+            state.host_promoted = promoted[:]
+        else:
+            state.guest_indices = indices[:]
+            state.guest_promoted = promoted[:]
+
+        with patch("game.game_logic.roll_dice", return_value=[1, 2]):
+            await comm.send_json_to({"action": "roll_dice"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "stage_move", "piece": 3, "die_index": 1})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "confirm_moves"})
+        final = await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        self.assertEqual(final["status"], "over")
+        self.assertEqual(final["winner"], mover)
+        self.assertIsNone(final["turn"])
+        self.assertEqual(final["promoted"][mover], [True] * 4)
+
+        host_over = await recv_until(host, "game_over")
+        guest_over = await recv_until(guest, "game_over")
+        self.assertEqual(host_over["winner"], mover)
+        self.assertEqual(guest_over["winner"], mover)
+        self.assertEqual(host_over["reason"], "promotion")
+        self.assertEqual(guest_over["reason"], "promotion")
+
+        room_state = store.get(room.id)
+        self.assertEqual(room_state.status, "over")
+        self.assertEqual(room_state.winner, mover)
 
         await host.disconnect()
         await guest.disconnect()

@@ -9,7 +9,8 @@ The board is 4 rows tall and 6 columns wide. All server-side state is stored in
 In the host's view the bottom two rows (2, 3) are RED (the host's own track) and
 the top two rows (0, 1) are BLUE (the opponent). The guest sees the very same
 board rotated 180 degrees, so the guest's own track also appears red along the
-bottom of *their* screen and their disk starts in *their* bottom-right corner.
+bottom of *their* screen and their four disks start along *their* bottom-left
+row.
 
 Each player's 4 disks travel a shared 12-cell loop around their own two-row
 track, advancing one cell counter-clockwise per move. Starting from the
@@ -49,9 +50,14 @@ LOCAL_LOOP: list[tuple[int, int]] = [
 ]
 
 LOOP_LEN = len(LOCAL_LOOP)
-START_INDEX = 0
-START_INDICES = [0, 11, 10, 9]
+START_INDEX = 7
+START_INDICES = [7, 8, 9, 10]
 NUM_PIECES = len(START_INDICES)
+
+# Crossing the seam between loop index 6 (a player's top-left cell, local
+# (2, 0)) and index 7 (their bottom-left cell, local (3, 0)) promotes the
+# moving piece. Landing on or passing through this index counts as crossing.
+PROMOTION_INDEX = START_INDEX
 
 
 def transform(r: int, c: int) -> tuple[int, int]:
@@ -88,6 +94,26 @@ def canonical_position(role: str, idx: int) -> tuple[int, int]:
 def advance(idx: int, steps: int = 1) -> int:
     """Index after moving ``steps`` cells counter-clockwise around the loop."""
     return (idx + steps) % LOOP_LEN
+
+
+def promotion_step(from_idx: int, steps: int) -> int | None:
+    """The 1-based step offset (1..steps) at which a move from ``from_idx``
+    lands on :data:`PROMOTION_INDEX`, or ``None`` if it never does.
+
+    A die is at most 6 (< LOOP_LEN), so the threshold cell is visited at most
+    once per move.
+    """
+    for offset in range(1, steps + 1):
+        if advance(from_idx, offset) == PROMOTION_INDEX:
+            return offset
+    return None
+
+
+def crosses_promotion(from_idx: int, steps: int) -> bool:
+    """Whether a move of ``steps`` cells from ``from_idx`` crosses the
+    promotion threshold (visits :data:`PROMOTION_INDEX`).
+    """
+    return promotion_step(from_idx, steps) is not None
 
 
 def roll_die() -> int:
