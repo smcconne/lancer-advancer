@@ -896,11 +896,22 @@
     }
   }
 
+  // Mobile browsers can end a touch with pointercancel instead of pointerup
+  // (e.g. when the browser takes over the gesture); make sure the dragged
+  // ghost is always cleaned up.
+  function onPointerCancel() {
+    if (!dragState) return;
+    endDrag();
+    drawBoard();
+    updateStatus();
+  }
+
   diceEls.forEach(function (el, i) {
     el.addEventListener("pointerdown", onDieDown(i));
   });
   window.addEventListener("pointermove", onPointerMove);
   window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerCancel);
 
   canvas.addEventListener("pointerdown", onBoardPointerDown);
   canvas.addEventListener("click", handleBoardClick);
