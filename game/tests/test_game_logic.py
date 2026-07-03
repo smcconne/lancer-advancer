@@ -160,3 +160,56 @@ class GameLogicTests(SimpleTestCase):
         self.assertTrue(gl.has_any_legal_assignment([7, 8, 9, 10], [1, 2], {}))
         self.assertFalse(gl.has_any_legal_assignment([0, 3, 6, 9], [3, 3], {}))
 
+    def test_fight_dice_regular_and_promoted(self):
+        with patch("game.game_logic.roll_die", side_effect=[2, 5, 6]):
+            self.assertEqual(gl.fight_dice(False), [2])
+            self.assertEqual(gl.fight_dice(True), [5, 6])
+        self.assertEqual(gl.fight_value([4]), 4)
+        self.assertEqual(gl.fight_value([2, 6]), 6)
+
+    def test_detect_fights_host_and_guest(self):
+        host_fights = gl.detect_fights(
+            gl.HOST,
+            [1, 8, 9, 10],
+            [6, 8, 9, 10],
+            [0],
+        )
+        self.assertEqual(
+            host_fights,
+            [{"attacker_piece": 0, "defender_piece": 0, "column": 5}],
+        )
+
+        guest_fights = gl.detect_fights(
+            gl.GUEST,
+            [1, 8, 9, 10],
+            [6, 8, 9, 10],
+            [0],
+        )
+        self.assertEqual(
+            guest_fights,
+            [{"attacker_piece": 0, "defender_piece": 0, "column": 0}],
+        )
+
+    def test_detect_fights_only_checks_moved_pieces(self):
+        fights = gl.detect_fights(
+            gl.HOST,
+            [1, 8, 9, 10],
+            [6, 8, 9, 10],
+            [1],
+        )
+        self.assertEqual(fights, [])
+
+    def test_apply_knockback_backward_push(self):
+        # Landing on 9 pushes 9->8 and 8->7 (7 is free).
+        indices = [0, 8, 9, 10]
+        new_indices, pushes = gl.apply_knockback(indices, loser_piece=3, landing_idx=9)
+        self.assertEqual(new_indices, [0, 7, 8, 9])
+        self.assertEqual(pushes, [(1, 8, 7), (2, 9, 8)])
+
+    def test_apply_knockback_flips_to_forward_at_center_boundary(self):
+        # Backward chain 9->8->7 would force 7->6, so flip to forward.
+        indices = [7, 8, 9, 10]
+        new_indices, pushes = gl.apply_knockback(indices, loser_piece=3, landing_idx=9)
+        self.assertEqual(new_indices, [7, 8, 10, 9])
+        self.assertEqual(pushes, [(2, 9, 10)])
+

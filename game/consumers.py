@@ -9,7 +9,8 @@ Realtime fan-out uses the in-memory channel layer. Two groups exist:
 
 The server is authoritative: clients only send intents (``roll_dice`` /
 ``stage_move`` / ``unstage_move`` / ``confirm_moves`` / ``pass_turn`` /
-``resign``) and render whatever canonical state the server broadcasts back.
+``fight_roll`` / ``resign``) and render whatever canonical state the server
+broadcasts back.
 """
 from __future__ import annotations
 
@@ -206,6 +207,9 @@ class GameConsumer(AsyncWebsocketConsumer):
                             "reason": "promotion",
                         },
                     )
+        elif action == "fight_roll":
+            if store.fight_roll(self.room_id, self.role) is not None:
+                await self._broadcast_state()
         elif action == "resign":
             room = store.resign(self.room_id, self.role)
             if room is not None:

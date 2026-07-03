@@ -22,6 +22,7 @@ PLAYING = "playing"  # both players present, game in progress
 OVER = "over"  # game finished (a player resigned)
 PHASE_ROLL = "roll"  # active player can roll the die
 PHASE_SELECT = "select"  # active player must choose a piece to move
+PHASE_FIGHT = "fight"  # queued center-row fights are being resolved
 
 
 @dataclass
@@ -49,9 +50,18 @@ class Room:
     last_roll: int | None = None
     last_mover: str | None = None
     last_moved_piece: int | None = None
+    last_move_from: list[int] | None = None
+    last_path: list[list[int]] = field(default_factory=list)
     first_roll: int | None = None  # first of two committed moves, for grey arrow
     first_moved_piece: int | None = None
+    first_move_from: list[int] | None = None
+    first_path: list[list[int]] = field(default_factory=list)
     no_legal_move: bool = False
+    fights: list[dict] = field(default_factory=list)
+    fight_attacker_dice: list[int] | None = None
+    fight_defender_dice: list[int] | None = None
+    fight_result: dict | None = None
+    previous_fight_result: dict | None = None
     winner: str | None = None  # gl.HOST or gl.GUEST once OVER
     state_version: int = 0  # Monotonic version for client stale-state guards.
     created_at: float = field(default_factory=time.time)
@@ -156,11 +166,20 @@ class GameStore:
             room.staged = {}
             room.last_mover = role
             room.last_moved_piece = None
+            room.last_move_from = None
+            room.last_path = []
             room.first_moved_piece = None
             room.first_roll = None
+            room.first_move_from = None
+            room.first_path = []
             room.no_legal_move = not gl.has_any_legal_assignment(
                 self._indices_for_role(room, role), room.pending_dice, {}
             )
+            room.fights = []
+            room.fight_attacker_dice = None
+            room.fight_defender_dice = None
+            room.fight_result = None
+            room.previous_fight_result = None
             room.phase = PHASE_SELECT
             room.state_version += 1
             return room
@@ -246,13 +265,27 @@ class GameStore:
 
             last_piece = None
             last_die = None
+            last_move_from = None
+            last_path: list[list[int]] = []
             promoted = self._promoted_for_role(room, role)
             moves = list(room.staged.items())  # insertion order: first .. last
+            first_move_from = None
+            first_path: list[list[int]] = []
             for piece, die_index in moves:
                 steps = room.pending_dice[die_index]
+                from_idx = indices[piece]
+                from_r, from_c = gl.canonical_position(role, from_idx)
+                path_cells = [
+                    [r, c] for (r, c) in gl.loop_path(role, from_idx, steps)
+                ]
                 if gl.crosses_promotion(indices[piece], steps):
                     promoted[piece] = True
                 indices[piece] = gl.advance(indices[piece], steps)
+                if first_move_from is None:
+                    first_move_from = [from_r, from_c]
+                    first_path = path_cells
+                last_move_from = [from_r, from_c]
+                last_path = path_cells
                 last_piece = piece
                 last_die = steps
 
@@ -260,22 +293,59 @@ class GameStore:
                 first_piece, first_die_index = moves[0]
                 room.first_moved_piece = first_piece
                 room.first_roll = room.pending_dice[first_die_index]
+                room.first_move_from = first_move_from
+                room.first_path = first_path
             else:
                 room.first_moved_piece = None
                 room.first_roll = None
+                room.first_move_from = None
+                room.first_path = []
 
-            room.phase = PHASE_ROLL
-            room.turn = gl.GUEST if role == gl.HOST else gl.HOST
             room.last_roll = last_die
             room.last_mover = role
             room.last_moved_piece = last_piece
+            room.last_move_from = last_move_from
+            room.last_path = last_path
             room.pending_dice = None
             room.staged = {}
             room.no_legal_move = False
+            room.fight_result = None
+            room.previous_fight_result = None
             if all(promoted):
                 room.status = OVER
                 room.winner = role
                 room.turn = None
+                room.phase = PHASE_ROLL
+                room.fights = []
+                room.fight_attacker_dice = None
+                room.fight_defender_dice = None
+            else:
+                opponent = gl.GUEST if role == gl.HOST else gl.HOST
+                fights = gl.detect_fights(
+                    role,
+                    indices,
+                    self._indices_for_role(room, opponent),
+                    [piece for piece, _ in moves],
+                )
+                if fights:
+                    room.phase = PHASE_FIGHT
+                    room.turn = role
+                    room.fights = [
+                        {
+                            "attacker_role": role,
+                            "defender_role": opponent,
+                            **fight,
+                        }
+                        for fight in fights
+                    ]
+                    room.fight_attacker_dice = None
+                    room.fight_defender_dice = None
+                else:
+                    room.phase = PHASE_ROLL
+                    room.turn = opponent
+                    room.fights = []
+                    room.fight_attacker_dice = None
+                    room.fight_defender_dice = None
             room.state_version += 1
             return room
 
@@ -302,13 +372,20 @@ class GameStore:
             # Apply whatever was staged before passing.
             promoted = self._promoted_for_role(room, role)
             moves = list(room.staged.items())
+            last_move_from = None
+            last_path: list[list[int]] = []
             for piece, die_index in moves:
                 steps = room.pending_dice[die_index]
+                from_idx = indices[piece]
+                from_r, from_c = gl.canonical_position(role, from_idx)
+                path_cells = [
+                    [r, c] for (r, c) in gl.loop_path(role, from_idx, steps)
+                ]
                 if gl.crosses_promotion(indices[piece], steps):
                     promoted[piece] = True
                 indices[piece] = gl.advance(indices[piece], steps)
-            room.phase = PHASE_ROLL
-            room.turn = gl.GUEST if role == gl.HOST else gl.HOST
+                last_move_from = [from_r, from_c]
+                last_path = path_cells
             room.last_mover = role
             # Passing with exactly one staged move means the other die was
             # unplayable. Surface that move so both clients keep showing its
@@ -317,18 +394,176 @@ class GameStore:
                 piece, die_index = moves[0]
                 room.last_moved_piece = piece
                 room.last_roll = room.pending_dice[die_index]
+                room.last_move_from = last_move_from
+                room.last_path = last_path
             else:
                 room.last_moved_piece = None
                 room.last_roll = None
+                room.last_move_from = None
+                room.last_path = []
             room.first_moved_piece = None
             room.first_roll = None
+            room.first_move_from = None
+            room.first_path = []
             room.pending_dice = None
             room.staged = {}
-            room.no_legal_move = True
+            room.fight_result = None
+            room.previous_fight_result = None
             if all(promoted):
                 room.status = OVER
                 room.winner = role
                 room.turn = None
+                room.phase = PHASE_ROLL
+                room.no_legal_move = False
+                room.fights = []
+                room.fight_attacker_dice = None
+                room.fight_defender_dice = None
+            else:
+                opponent = gl.GUEST if role == gl.HOST else gl.HOST
+                fights = gl.detect_fights(
+                    role,
+                    indices,
+                    self._indices_for_role(room, opponent),
+                    [piece for piece, _ in moves],
+                )
+                if fights:
+                    room.phase = PHASE_FIGHT
+                    room.turn = role
+                    room.no_legal_move = False
+                    room.fights = [
+                        {
+                            "attacker_role": role,
+                            "defender_role": opponent,
+                            **fight,
+                        }
+                        for fight in fights
+                    ]
+                    room.fight_attacker_dice = None
+                    room.fight_defender_dice = None
+                else:
+                    room.phase = PHASE_ROLL
+                    room.turn = opponent
+                    room.no_legal_move = True
+                    room.fights = []
+                    room.fight_attacker_dice = None
+                    room.fight_defender_dice = None
+            room.state_version += 1
+            return room
+
+    def fight_roll(self, room_id: str, role: str) -> Room | None:
+        """Roll combat dice for one side of the active fight.
+
+        When both sides have rolled, resolves the fight immediately.
+        """
+        with self._lock:
+            room = self._rooms.get(room_id)
+            if (
+                room is None
+                or room.status != PLAYING
+                or room.phase != PHASE_FIGHT
+                or not room.fights
+            ):
+                return None
+
+            fight = room.fights[0]
+            attacker_role = fight["attacker_role"]
+            defender_role = fight["defender_role"]
+            attacker_piece = fight["attacker_piece"]
+            defender_piece = fight["defender_piece"]
+
+            attacker_promoted_flags = self._promoted_for_role(room, attacker_role)
+            defender_promoted_flags = self._promoted_for_role(room, defender_role)
+            attacker_promoted = bool(attacker_promoted_flags[attacker_piece])
+            defender_promoted = bool(defender_promoted_flags[defender_piece])
+
+            if role == attacker_role:
+                if room.fight_attacker_dice is not None:
+                    return None
+                room.fight_attacker_dice = gl.fight_dice(attacker_promoted)
+            elif role == defender_role:
+                if room.fight_defender_dice is not None:
+                    return None
+                room.fight_defender_dice = gl.fight_dice(defender_promoted)
+            else:
+                return None
+
+            if room.fight_attacker_dice is None or room.fight_defender_dice is None:
+                room.state_version += 1
+                return room
+
+            attacker_value = gl.fight_value(room.fight_attacker_dice)
+            defender_value = gl.fight_value(room.fight_defender_dice)
+            attacker_wins = attacker_value >= defender_value
+
+            winner_role = attacker_role if attacker_wins else defender_role
+            loser_role = defender_role if attacker_wins else attacker_role
+            winner_piece = attacker_piece if attacker_wins else defender_piece
+            loser_piece = defender_piece if attacker_wins else attacker_piece
+
+            demoted = False
+            if attacker_wins and (not attacker_promoted) and defender_promoted:
+                defender_promoted_flags[defender_piece] = False
+                demoted = True
+
+            loser_indices = self._indices_for_role(room, loser_role)
+            loser_from_idx = loser_indices[loser_piece]
+            loser_r, loser_c = gl.canonical_position(loser_role, loser_from_idx)
+            _, loser_local_col = gl.to_local(loser_role, loser_r, loser_c)
+            landing_idx = gl.fight_landing_index(loser_local_col)
+            loser_to_r, loser_to_c = gl.canonical_position(loser_role, landing_idx)
+
+            new_loser_indices, pushes = gl.apply_knockback(
+                loser_indices, loser_piece, landing_idx
+            )
+            if loser_role == gl.HOST:
+                room.host_indices = new_loser_indices
+            else:
+                room.guest_indices = new_loser_indices
+
+            push_events = []
+            for pushed_piece, from_idx, to_idx in pushes:
+                from_r, from_c = gl.canonical_position(loser_role, from_idx)
+                to_r, to_c = gl.canonical_position(loser_role, to_idx)
+                push_events.append(
+                    {
+                        "piece": pushed_piece,
+                        "from": [from_r, from_c],
+                        "to": [to_r, to_c],
+                    }
+                )
+
+            room.fight_result = {
+                "attacker": attacker_role,
+                "defender": defender_role,
+                "column": fight["column"],
+                "winner": winner_role,
+                "winner_piece": winner_piece,
+                "loser": loser_role,
+                "loser_piece": loser_piece,
+                "attacker_value": attacker_value,
+                "defender_value": defender_value,
+                "attacker_dice": list(room.fight_attacker_dice),
+                "defender_dice": list(room.fight_defender_dice),
+                "loser_from": [loser_r, loser_c],
+                "loser_to": [loser_to_r, loser_to_c],
+                "pushes": push_events,
+                "demoted": demoted,
+            }
+
+            room.fights.pop(0)
+            if room.fights:
+                room.previous_fight_result = room.fight_result
+                room.phase = PHASE_FIGHT
+                room.turn = attacker_role
+                room.fight_attacker_dice = None
+                room.fight_defender_dice = None
+            else:
+                room.phase = PHASE_ROLL
+                room.turn = gl.GUEST if attacker_role == gl.HOST else gl.HOST
+                room.fights = []
+                room.fight_attacker_dice = None
+                room.fight_defender_dice = None
+            room.no_legal_move = False
             room.state_version += 1
             return room
 
@@ -344,6 +579,15 @@ class GameStore:
             room.phase = PHASE_ROLL
             room.pending_dice = None
             room.staged = {}
+            room.last_move_from = None
+            room.last_path = []
+            room.first_move_from = None
+            room.first_path = []
+            room.fights = []
+            room.fight_attacker_dice = None
+            room.fight_defender_dice = None
+            room.fight_result = None
+            room.previous_fight_result = None
             room.state_version += 1
             return room
 
@@ -360,59 +604,21 @@ class GameStore:
             for idx in room.guest_indices
         ]
 
-        path: list[list[int]] = []
-        move_from: list[int] | None = None
-        if (
-            room.last_mover
-            and room.last_roll
-            and isinstance(room.last_moved_piece, int)
-        ):
-            mover_indices = (
-                room.host_indices
-                if room.last_mover == gl.HOST
-                else room.guest_indices
-            )
-            if 0 <= room.last_moved_piece < len(mover_indices):
-                mover_idx = mover_indices[room.last_moved_piece]
-                from_idx = gl.advance(mover_idx, -room.last_roll)
-                from_r, from_c = gl.canonical_position(room.last_mover, from_idx)
-                move_from = [from_r, from_c]
-                path = [
-                    [r, c]
-                    for (r, c) in gl.loop_path(
-                        room.last_mover, from_idx, room.last_roll
-                    )
-                ]
+        move_from = list(room.last_move_from) if room.last_move_from else None
+        path = [list(cell) for cell in room.last_path]
 
-        first_path: list[list[int]] = []
-        first_move_from: list[int] | None = None
-        if (
-            room.last_mover
-            and room.first_roll
-            and isinstance(room.first_moved_piece, int)
-        ):
-            mover_indices = (
-                room.host_indices
-                if room.last_mover == gl.HOST
-                else room.guest_indices
-            )
-            if 0 <= room.first_moved_piece < len(mover_indices):
-                mover_idx = mover_indices[room.first_moved_piece]
-                from_idx = gl.advance(mover_idx, -room.first_roll)
-                from_r, from_c = gl.canonical_position(room.last_mover, from_idx)
-                first_move_from = [from_r, from_c]
-                first_path = [
-                    [r, c]
-                    for (r, c) in gl.loop_path(
-                        room.last_mover, from_idx, room.first_roll
-                    )
-                ]
+        first_move_from = (
+            list(room.first_move_from) if room.first_move_from else None
+        )
+        first_path = [list(cell) for cell in room.first_path]
 
         previews: list[dict] = []
         dice = room.pending_dice if isinstance(room.pending_dice, list) else None
         staged = [[piece, die] for piece, die in room.staged.items()]
         can_confirm = False
         can_pass = False
+        can_fight_roll = {gl.HOST: False, gl.GUEST: False}
+        fight_payload = None
         if (
             room.status == PLAYING
             and room.phase == PHASE_SELECT
@@ -467,6 +673,57 @@ class GameStore:
                 turn_indices, dice, room.staged
             )
 
+        if (
+            room.status == PLAYING
+            and room.phase == PHASE_FIGHT
+            and room.fights
+        ):
+            current_fight = room.fights[0]
+            attacker_role = current_fight["attacker_role"]
+            defender_role = current_fight["defender_role"]
+            attacker_piece = current_fight["attacker_piece"]
+            defender_piece = current_fight["defender_piece"]
+            attacker_promoted = (
+                room.host_promoted[attacker_piece]
+                if attacker_role == gl.HOST
+                else room.guest_promoted[attacker_piece]
+            )
+            defender_promoted = (
+                room.host_promoted[defender_piece]
+                if defender_role == gl.HOST
+                else room.guest_promoted[defender_piece]
+            )
+            can_fight_roll = {
+                gl.HOST: False,
+                gl.GUEST: False,
+            }
+            can_fight_roll[attacker_role] = room.fight_attacker_dice is None
+            can_fight_roll[defender_role] = room.fight_defender_dice is None
+            fight_payload = {
+                "attacker": attacker_role,
+                "defender": defender_role,
+                "attacker_piece": attacker_piece,
+                "defender_piece": defender_piece,
+                "column": current_fight["column"],
+                "attacker_die_count": 2 if attacker_promoted else 1,
+                "defender_die_count": 2 if defender_promoted else 1,
+                "attacker_dice": room.fight_attacker_dice,
+                "defender_dice": room.fight_defender_dice,
+                "attacker_value": (
+                    None
+                    if room.fight_attacker_dice is None
+                    else gl.fight_value(room.fight_attacker_dice)
+                ),
+                "defender_value": (
+                    None
+                    if room.fight_defender_dice is None
+                    else gl.fight_value(room.fight_defender_dice)
+                ),
+                "remaining": len(room.fights),
+                "can_roll": can_fight_roll,
+                "result": None,
+            }
+
         return {
             "version": room.state_version,
             "status": room.status,
@@ -486,6 +743,10 @@ class GameStore:
             "first_moved_piece": room.first_moved_piece,
             "first_move_from": first_move_from,
             "first_path": first_path,
+            "fight": fight_payload,
+            "fight_result": room.fight_result,
+            "previous_fight_result": room.previous_fight_result,
+            "can_fight_roll": can_fight_roll,
             "disks": {
                 "host": host_disks,
                 "guest": guest_disks,

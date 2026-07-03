@@ -71,7 +71,13 @@
         <button id="turn-btn" class="btn btn-primary" disabled>Roll Dice</button>
       </div>
       <div class="controls-row controls-row-split">
-        <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
+        <div class="pass-slot">
+          <button id="pass-btn" class="btn btn-secondary" disabled>Pass</button>
+          <span id="opponent-fight-tray" class="fight-tray hidden" aria-hidden="true" aria-live="polite">
+            <span id="opponent-fight-roll-indicator-0" class="turn-roll-indicator hidden" aria-hidden="true"></span>
+            <span id="opponent-fight-roll-indicator-1" class="turn-roll-indicator hidden" aria-hidden="true"></span>
+          </span>
+        </div>
         <button id="resign-btn" class="btn btn-danger" disabled>Resign</button>
       </div>
     </div>
@@ -80,6 +86,7 @@
   <!-- Result / error popup -->
   <div id="overlay" class="overlay hidden">
     <div class="modal">
+      <img id="overlay-icon" class="overlay-icon hidden" alt="" aria-hidden="true" />
       <h2 id="overlay-title"></h2>
       <p id="overlay-text"></p>
       <a class="btn btn-primary" href="/">Back to Lobby</a>
@@ -89,12 +96,24 @@
   <script>
     window.ROOM_ID = "{{ room_id|escapejs }}";
     window.SERVER_BUILD_ID = "{{ build_id|escapejs }}";
-    window.LANCE_BG_URL = "{% static 'game/img/lance_background.svg' %}";
+    window.LANCE_BG_URL = "{% static 'game/img/lance-background.svg' %}";
+    window.LANCE_BATTLE_URL = "{% static 'game/img/lance-battle.svg' %}";
+    window.CLASH_URL = "{% static 'game/img/clash.svg' %}";
     window.HELMET_BG_URL = "{% static 'game/img/helmet-background.svg' %}";
     window.CHECK_BG_URL = "{% static 'game/img/check-background.svg' %}";
+    window.VICTORY_URL = "{% static 'game/img/victory.svg' %}";
+    window.DEFEAT_URL = "{% static 'game/img/defeat.svg' %}";
     window.KNIGHT_LANCE_UP_URL = "{% static 'game/img/knight-icon-lance-up.svg' %}";
     window.KNIGHT_LANCE_DOWN_URL = "{% static 'game/img/knight-icon-lance-down.svg' %}";
   </script>
+  <script src="{% static 'game/js/constants.js' %}"></script>
+  <script src="{% static 'game/js/dom.js' %}"></script>
+  <script src="{% static 'game/js/state.js' %}"></script>
+  <script src="{% static 'game/js/helpers.js' %}"></script>
+  <script src="{% static 'game/js/assets.js' %}"></script>
+  <script src="{% static 'game/js/render.js' %}"></script>
+  <script src="{% static 'game/js/dice.js' %}"></script>
+  <script src="{% static 'game/js/net.js' %}"></script>
   <script src="{% static 'game/js/game.js' %}"></script>
 </body>
 </html>

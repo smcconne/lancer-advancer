@@ -429,6 +429,181 @@ class GameConsumerTests(IsolatedAsyncioTestCase):
         await host.disconnect()
         await guest.disconnect()
 
+    async def test_confirm_can_enter_fight_phase_and_resolve_after_two_rolls(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+        defender = guest if mover == "host" else host
+        loser_role = "guest" if mover == "host" else "host"
+
+        state = store.get(room.id)
+        mover_setup = [11, 3, 7, 9]
+        defender_setup = [6, 8, 9, 10]
+        if mover == "host":
+            state.host_indices = mover_setup[:]
+            state.guest_indices = defender_setup[:]
+        else:
+            state.guest_indices = mover_setup[:]
+            state.host_indices = defender_setup[:]
+
+        with patch("game.game_logic.roll_dice", return_value=[2, 1]):
+            await comm.send_json_to({"action": "roll_dice"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "confirm_moves"})
+        fight_state = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertEqual(fight_state["phase"], "fight")
+        self.assertIsNotNone(fight_state["fight"])
+        self.assertEqual(fight_state["fight"]["attacker"], mover)
+        self.assertEqual(fight_state["fight"]["defender"], loser_role)
+        self.assertTrue(fight_state["can_fight_roll"][mover])
+        self.assertTrue(fight_state["can_fight_roll"][loser_role])
+        fight_column = fight_state["fight"]["column"]
+
+        with patch("game.game_logic.roll_die", side_effect=[6, 2]):
+            await comm.send_json_to({"action": "fight_roll"})
+            after_first = await recv_until(host, "state")
+            await recv_until(guest, "state")
+            self.assertEqual(after_first["phase"], "fight")
+            self.assertIsNotNone(after_first["fight"]["attacker_dice"])
+            self.assertIsNone(after_first["fight"]["defender_dice"])
+
+            await defender.send_json_to({"action": "fight_roll"})
+            final_state = await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        self.assertEqual(final_state["phase"], "roll")
+        self.assertEqual(final_state["turn"], loser_role)
+        self.assertIsNone(final_state["fight"])
+        expected_row = 0 if loser_role == "guest" else 3
+        self.assertEqual(final_state["disks"][loser_role][0], [expected_row, fight_column])
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_unpromoted_attacker_tie_wins_and_demotes_promoted_defender(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+        defender = guest if mover == "host" else host
+        defender_role = "guest" if mover == "host" else "host"
+
+        state = store.get(room.id)
+        mover_setup = [11, 3, 7, 9]
+        defender_setup = [6, 8, 9, 10]
+        if mover == "host":
+            state.host_indices = mover_setup[:]
+            state.guest_indices = defender_setup[:]
+            state.guest_promoted = [True, False, False, False]
+        else:
+            state.guest_indices = mover_setup[:]
+            state.host_indices = defender_setup[:]
+            state.host_promoted = [True, False, False, False]
+
+        with patch("game.game_logic.roll_dice", return_value=[2, 1]):
+            await comm.send_json_to({"action": "roll_dice"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "confirm_moves"})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        with patch("game.game_logic.roll_die", side_effect=[4, 4, 1]):
+            await comm.send_json_to({"action": "fight_roll"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+            await defender.send_json_to({"action": "fight_roll"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        room_state = store.get(room.id)
+        self.assertFalse(getattr(room_state, defender_role + "_promoted")[0])
+        self.assertTrue(room_state.fight_result["demoted"])
+        self.assertEqual(room_state.fight_result["winner"], mover)
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_fight_roll_outside_fight_phase_is_ignored(self):
+        _, host, guest, playing = await self._start_game()
+        comm = host if playing["turn"] == "host" else guest
+
+        await comm.send_json_to({"action": "fight_roll"})
+        self.assertTrue(await comm.receive_nothing(timeout=0.3))
+
+        await host.disconnect()
+        await guest.disconnect()
+
+    async def test_fight_knockback_does_not_shift_committed_move_arrow(self):
+        room, host, guest, playing = await self._start_game()
+        mover = playing["turn"]
+        comm = host if mover == "host" else guest
+        defender = guest if mover == "host" else host
+
+        state = store.get(room.id)
+        mover_setup = [11, 3, 7, 9]
+        defender_setup = [6, 8, 9, 10]
+        if mover == "host":
+            state.host_indices = mover_setup[:]
+            state.guest_indices = defender_setup[:]
+        else:
+            state.guest_indices = mover_setup[:]
+            state.host_indices = defender_setup[:]
+
+        with patch("game.game_logic.roll_dice", return_value=[2, 1]):
+            await comm.send_json_to({"action": "roll_dice"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        # Stage non-fight move first so the fighting move is the final committed move.
+        await comm.send_json_to({"action": "stage_move", "piece": 1, "die_index": 1})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+        await comm.send_json_to({"action": "stage_move", "piece": 0, "die_index": 0})
+        await recv_until(host, "state")
+        await recv_until(guest, "state")
+
+        await comm.send_json_to({"action": "confirm_moves"})
+        pre_fight = await recv_until(host, "state")
+        await recv_until(guest, "state")
+        self.assertEqual(pre_fight["phase"], "fight")
+        self.assertTrue(pre_fight["path"])
+        locked_move_from = pre_fight["move_from"]
+        locked_path = pre_fight["path"]
+
+        # Defender wins; attacker (last moved piece) is knocked back.
+        with patch("game.game_logic.roll_die", side_effect=[1, 6]):
+            await comm.send_json_to({"action": "fight_roll"})
+            await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+            await defender.send_json_to({"action": "fight_roll"})
+            post_fight = await recv_until(host, "state")
+            await recv_until(guest, "state")
+
+        self.assertEqual(post_fight["phase"], "roll")
+        self.assertEqual(post_fight["move_from"], locked_move_from)
+        self.assertEqual(post_fight["path"], locked_path)
+
+        await host.disconnect()
+        await guest.disconnect()
+
     async def test_unknown_room_is_rejected(self):
         comm = await self._connect("does-not-exist", "tok")
         err = await recv_until(comm, "error")

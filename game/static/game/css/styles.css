@@ -120,6 +120,22 @@ h2 {
   align-items: center;
 }
 
+.dice-tray.hidden {
+  display: none;
+}
+
+.fight-tray {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  justify-content: center;
+  min-height: calc(1.4rem + 1lh);
+}
+
+.fight-tray.hidden {
+  display: none;
+}
+
 .turn-roll-indicator.die--draggable {
   cursor: grab;
   touch-action: none;
@@ -281,6 +297,12 @@ h2 {
   transform: translate(calc(-50% + 54px), -50%);
 }
 
+#die.die--solo,
+#die-2.die--solo {
+  left: 50%;
+  transform: translate(-50%, -50%);
+}
+
 .die__cube {
   position: relative;
   width: 100%;
@@ -401,6 +423,12 @@ h2 {
   display: contents;
 }
 
+.pass-slot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 .controls-row-split {
   display: contents;
 }
@@ -425,6 +453,15 @@ h2 {
   padding: 2rem 2.5rem;
   text-align: center;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.overlay-icon {
+  display: block;
+  width: min(180px, 48vw);
+  height: min(120px, 32vw);
+  object-fit: contain;
+  object-position: center;
+  margin: 0 auto 0.9rem;
 }
 
 .modal h2 {

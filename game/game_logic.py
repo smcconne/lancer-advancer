@@ -126,6 +126,18 @@ def roll_dice() -> list[int]:
     return [roll_die(), roll_die()]
 
 
+def fight_dice(promoted: bool) -> list[int]:
+    """Dice rolled for a fight: one die normally, two dice when promoted."""
+    if promoted:
+        return [roll_die(), roll_die()]
+    return [roll_die()]
+
+
+def fight_value(dice: list[int]) -> int:
+    """Combat value for a fight roll (promoted pieces keep their higher die)."""
+    return max(dice) if dice else 0
+
+
 def staged_collisions(
     indices: list[int], dice: list[int], staged: dict[int, int]
 ) -> set[int]:
@@ -216,3 +228,99 @@ def legal_piece_moves(indices: list[int], roll: int) -> list[int]:
         if not blocked:
             legal.append(piece)
     return legal
+
+
+def detect_fights(
+    mover_role: str,
+    mover_indices: list[int],
+    opponent_indices: list[int],
+    moved_pieces_in_order: list[int],
+) -> list[dict]:
+    """Find fights triggered by moved pieces now across the center rows.
+
+    A moved attacker at canonical (1, c) or (2, c) triggers a fight when an
+    opponent occupies the across cell ((2, c) or (1, c)).
+    """
+    if mover_role not in (HOST, GUEST):
+        return []
+    opponent_role = GUEST if mover_role == HOST else HOST
+    fights: list[dict] = []
+    for attacker_piece in moved_pieces_in_order:
+        if attacker_piece < 0 or attacker_piece >= len(mover_indices):
+            continue
+        r, c = canonical_position(mover_role, mover_indices[attacker_piece])
+        if r not in (1, 2):
+            continue
+        across = (3 - r, c)
+        defender_piece = None
+        for piece, idx in enumerate(opponent_indices):
+            if canonical_position(opponent_role, idx) == across:
+                defender_piece = piece
+                break
+        if defender_piece is None:
+            continue
+        fights.append(
+            {
+                "attacker_piece": attacker_piece,
+                "defender_piece": defender_piece,
+                "column": c,
+            }
+        )
+    return fights
+
+
+def fight_landing_index(local_col: int) -> int:
+    """Loop index for local outer row cell (3, local_col)."""
+    if local_col < 0 or local_col >= COLS:
+        raise ValueError("local_col out of range")
+    return 7 + local_col
+
+
+def apply_knockback(
+    indices: list[int], loser_piece: int, landing_idx: int
+) -> tuple[list[int], list[tuple[int, int, int]]]:
+    """Knock loser to landing index and push occupants without overlap.
+
+    Returns ``(new_indices, pushes)`` where pushes are ``(piece, from_idx,
+    to_idx)`` entries for displaced pieces.
+    """
+    if loser_piece < 0 or loser_piece >= len(indices):
+        return (list(indices), [])
+
+    positions: dict[int, int] = {
+        idx: piece for piece, idx in enumerate(indices) if piece != loser_piece
+    }
+
+    def would_cross_center(start: int) -> bool:
+        cur = start
+        seen = set()
+        while cur in positions and cur not in seen:
+            if cur == 7:
+                return True
+            seen.add(cur)
+            cur = advance(cur, -1)
+        return False
+
+    pushes: list[tuple[int, int, int]] = []
+    if landing_idx in positions:
+        step = 1 if would_cross_center(landing_idx) else -1
+        empty = landing_idx
+        seen = set()
+        while empty in positions and empty not in seen:
+            seen.add(empty)
+            empty = advance(empty, step)
+
+        cur = empty
+        while cur != landing_idx:
+            src = advance(cur, -step)
+            pushed_piece = positions[src]
+            positions[cur] = pushed_piece
+            del positions[src]
+            pushes.append((pushed_piece, src, cur))
+            cur = src
+
+    positions[landing_idx] = loser_piece
+    new_indices = list(indices)
+    for idx, piece in positions.items():
+        new_indices[piece] = idx
+    return new_indices, pushes
